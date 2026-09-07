@@ -112,6 +112,7 @@ impl PlatformStrategy for WindowsPlatform {
         let current_pid = std::process::id();
         let mut results: Vec<ConflictingProcessInfo> = Vec::new();
         let mut seen_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut cim_query_succeeded = false;
 
         // 1. Primary: Use PowerShell + CIM with JSON serialization to safely inspect sing-box processes
         if let Ok(output) = std::process::Command::new("powershell")
@@ -122,7 +123,9 @@ impl PlatformStrategy for WindowsPlatform {
                 "Get-CimInstance Win32_Process -Filter \"Name = 'sing-box.exe' or Name = 'singbox.exe' or Name = 'sing-box'\" | Select-Object ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath | ConvertTo-Json -Compress",
             ])
             .output()
-            && output.status.success() {
+        {
+            if output.status.success() {
+                cim_query_succeeded = true;
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let items = parse_cim_process_json(&stdout);
                 let filtered = filter_conflicting_processes(items, current_pid, managed_pid, running_config_path);
@@ -132,9 +135,12 @@ impl PlatformStrategy for WindowsPlatform {
                     }
                 }
             }
+        }
 
-        // 2. Secondary fallback: tasklist if PowerShell returned nothing or failed
-        if results.is_empty() {
+        // 2. Secondary fallback: tasklist only when the CIM query itself failed.
+        // A successful CIM query that yields no external process is authoritative; falling
+        // back here loses command-line/parent information and can report Subout's own child.
+        if should_fallback_to_tasklist(cim_query_succeeded) {
             for img_name in &["sing-box.exe", "singbox.exe"] {
                 if let Ok(output) = std::process::Command::new("tasklist")
                     .args([
@@ -536,6 +542,10 @@ pub fn parse_cim_process_json(stdout: &str) -> Vec<CimProcessItem> {
     }
 }
 
+fn should_fallback_to_tasklist(cim_query_succeeded: bool) -> bool {
+    !cim_query_succeeded
+}
+
 pub fn filter_conflicting_processes(
     items: Vec<CimProcessItem>,
     current_pid: u32,
@@ -697,6 +707,12 @@ mod tests {
         assert_eq!(parsed[0].process_id, Some(1234));
         assert_eq!(parsed[1].process_id, Some(5678));
         assert_eq!(parsed[1].name.as_deref(), Some("singbox.exe"));
+    }
+
+    #[test]
+    fn test_tasklist_fallback_is_only_used_when_cim_query_failed() {
+        assert!(!should_fallback_to_tasklist(true));
+        assert!(should_fallback_to_tasklist(false));
     }
 
     #[test]
