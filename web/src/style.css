@@ -164,6 +164,12 @@ body {
   min-height: 100vh;
 }
 
+/* Let views shrink inside the navigation flex layout instead of forcing the
+   document wider than the viewport. */
+.app-main {
+  min-width: 0;
+}
+
 /* Scrollbars */
 ::-webkit-scrollbar {
   width: 8px;

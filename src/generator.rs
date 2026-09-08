@@ -101,9 +101,6 @@ pub fn sanitize_dns_value(dns: &mut Value) {
                     if !srv_obj.contains_key("inet4_range") {
                         srv_obj.insert("inet4_range".to_string(), json!("198.18.0.0/15"));
                     }
-                    if !srv_obj.contains_key("inet6_range") {
-                        srv_obj.insert("inet6_range".to_string(), json!("fc00::/18"));
-                    }
                 }
             }
         }
@@ -530,6 +527,7 @@ mod tests {
         let mut win_inbound = json!({
             "type": "tun",
             "tag": "tun-in",
+            "address": ["172.19.0.1/30"],
             "interface_name": "tun0",
             "auto_redirect": true
         });
@@ -540,11 +538,35 @@ mod tests {
             Some(&json!("subout-tun"))
         );
         assert_eq!(win_inbound.get("stack"), Some(&json!("mixed")));
-        assert_eq!(
-            win_inbound.get("address"),
-            Some(&json!(["172.19.0.1/30", "fd00::1/126"]))
-        );
+        assert_eq!(win_inbound.get("address"), Some(&json!(["172.19.0.1/30"])));
         assert_eq!(win_inbound.get("strict_route"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_sanitize_dns_preserves_fakeip_address_families_as_configured() {
+        let mut dns_without_ipv6 = json!({
+            "servers": [{
+                "type": "fakeip",
+                "tag": "dns_fakeip",
+                "inet4_range": "198.18.0.0/15"
+            }]
+        });
+        sanitize_dns_value(&mut dns_without_ipv6);
+        assert!(dns_without_ipv6["servers"][0].get("inet6_range").is_none());
+
+        let mut dns_with_ipv6 = json!({
+            "servers": [{
+                "type": "fakeip",
+                "tag": "dns_fakeip",
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "fc00::/18"
+            }]
+        });
+        sanitize_dns_value(&mut dns_with_ipv6);
+        assert_eq!(
+            dns_with_ipv6["servers"][0]["inet6_range"],
+            json!("fc00::/18")
+        );
     }
 
     #[test]

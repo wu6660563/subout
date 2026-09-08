@@ -34,6 +34,9 @@ pub async fn add_subscription(
     Json(payload): Json<SubRequest>,
 ) -> Result<Json<db::Subscription>, StatusCode> {
     check_auth(&state, &headers).await?;
+    crate::validate_public_http_url(&payload.url)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let conn = get_db_conn(&state.db_path)?;
 
     let kws = payload.filter_keywords.unwrap_or_else(|| "[]".to_string());
@@ -73,6 +76,9 @@ pub async fn update_subscription(
     Json(payload): Json<SubRequest>,
 ) -> Result<StatusCode, StatusCode> {
     check_auth(&state, &headers).await?;
+    crate::validate_public_http_url(&payload.url)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let conn = get_db_conn(&state.db_path)?;
 
     let kws = payload.filter_keywords.unwrap_or_else(|| "[]".to_string());

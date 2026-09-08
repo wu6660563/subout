@@ -922,7 +922,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import {
   token,
   API_BASE,
@@ -933,6 +933,7 @@ import {
   kernelInfo,
   fetchKernelInfo,
   serviceStatus,
+  setServiceStatus,
   systemModeInfo,
   fetchServiceStatus,
   confirmDialog,
@@ -957,6 +958,7 @@ const stoppingService = ref(false);
 const restartingService = ref(false);
 const killingPid = ref(null);
 const isTakingOver = ref(false);
+const elevationChecking = ref(false);
 
 const conflictingProcesses = computed(
   () => serviceStatus.value.conflicting_processes || [],
@@ -970,8 +972,6 @@ const isDownloading = computed(() => {
 const isKernelReady = computed(() => {
   return !!kernelInfo.value?.is_installed && !isDownloading.value;
 });
-
-let statusTimer = null;
 
 const formatUptime = (secs) => {
   if (!secs && secs !== 0) return "0秒";
@@ -1237,6 +1237,109 @@ const handleKillExternalAll = async () => {
   }
 };
 
+const waitForElevatedPanel = async () => {
+  // The old process is asked to stop after the elevate endpoint returns.  Do
+  // not reload immediately, or the browser can reconnect to that old process.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      const response = await fetch(`${API_BASE}/api/system/tun-elevation`, {
+        headers: { Authorization: `Bearer ${token.value}` },
+        signal: AbortSignal.timeout(1000),
+      });
+      // A new process has a fresh login session and may return 401. With
+      // login disabled, distinguish the new instance by its elevated state.
+      if (response.status === 401) {
+        window.location.reload();
+        return;
+      }
+      if (response.ok) {
+        const status = await response.json();
+        if (status.is_elevated) {
+          window.location.reload();
+          return;
+        }
+      }
+    } catch {
+      // The old process releases the port before the elevated process binds.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  showToast("管理员实例正在启动，请稍后手动刷新页面。", "warning");
+};
+
+const requestWindowsTunElevation = async () => {
+  if (elevationChecking.value) return false;
+  elevationChecking.value = true;
+  try {
+    const statusRes = await fetch(`${API_BASE}/api/system/tun-elevation`, {
+      headers: { Authorization: `Bearer ${token.value}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!statusRes.ok) return false;
+
+    const status = await statusRes.json();
+    if (!status.required) return false;
+
+    const confirmed = await confirmDialog(
+      "当前生效配置包含 Windows TUN 入站。TUN 创建虚拟网卡和路由需要管理员权限。确认后将弹出 Windows 的 UAC 提示，Subout 会安全重启为管理员实例，浏览器随后自动重新连接。",
+      {
+        title: "TUN 需要管理员权限",
+        confirmText: "以管理员身份重启",
+        cancelText: "暂不启用 TUN",
+      },
+    );
+    if (!confirmed) return false;
+
+    const elevateRes = await fetch(`${API_BASE}/api/system/elevate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token.value}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!elevateRes.ok) {
+      const message = await elevateRes.text();
+      showToast(`未能请求管理员权限: ${message}`, "danger");
+      return false;
+    }
+
+    showToast("已请求管理员权限，正在切换到管理员实例…", "warning");
+    await waitForElevatedPanel();
+    return true;
+  } catch (error) {
+    showToast(`检查 TUN 管理员权限失败: ${error.message || error}`, "danger");
+    return false;
+  } finally {
+    elevationChecking.value = false;
+  }
+};
+
+/**
+ * 服务操作 API 返回的状态比后台定时轮询更权威。先立即写入，再短暂确认，
+ * 使启动、停止和重启在页面上的反馈保持一致。
+ */
+const syncServiceStatusAfterOperation = async (operationResult, expectedRunning) => {
+  if (operationResult?.service_status) {
+    setServiceStatus(operationResult.service_status);
+  }
+
+  const maxAttempts = expectedRunning ? 5 : 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const status = await fetchServiceStatus();
+    const isExpectedState = expectedRunning
+      ? status?.running && status?.ready
+      : !status?.running;
+    if (isExpectedState) {
+      return status;
+    }
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  return serviceStatus.value;
+};
+
 const handleStartService = async (customSudoPass = null) => {
   let sudoPass =
     typeof customSudoPass === "string"
@@ -1277,11 +1380,12 @@ const handleStartService = async (customSudoPass = null) => {
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
+      const startResult = await res.json().catch(() => ({}));
       showToast("sing-box 服务已成功启动！");
       if (sudoPass) {
         setSessionSudoPassword(sudoPass);
       }
-      await fetchServiceStatus();
+      await syncServiceStatusAfterOperation(startResult, true);
     } else {
       const err = await res.text();
       const errLower = err.toLowerCase();
@@ -1322,6 +1426,8 @@ const handleStartService = async (customSudoPass = null) => {
         } else {
           showToast("已取消管理员提权授权", "warning");
         }
+      } else if (isWindows && err.includes("Windows TUN 模式需要以管理员身份运行")) {
+        await requestWindowsTunElevation();
       } else {
         showToast(`启动失败: ${err}`, "danger");
       }
@@ -1343,8 +1449,9 @@ const handleStopService = async () => {
       signal: AbortSignal.timeout(8000),
     });
     if (res.ok) {
+      const stopResult = await res.json().catch(() => ({}));
       showToast("sing-box 服务已停止");
-      await fetchServiceStatus();
+      await syncServiceStatusAfterOperation(stopResult, false);
     } else {
       const err = await res.text();
       showToast(`停止服务失败: ${err}`, "danger");
@@ -1384,11 +1491,12 @@ const handleRestartService = async (customSudoPass = null) => {
       signal: AbortSignal.timeout(12000),
     });
     if (res.ok) {
+      const restartResult = await res.json().catch(() => ({}));
       showToast("sing-box 服务已成功重启！");
       if (sudoPass) {
         setSessionSudoPassword(sudoPass);
       }
-      await fetchServiceStatus();
+      await syncServiceStatusAfterOperation(restartResult, true);
     } else {
       const err = await res.text();
       const errLower = err.toLowerCase();
@@ -1496,11 +1604,7 @@ onMounted(async () => {
   await fetchKernelInfo();
   await loadDashboardData();
   initAjv();
-  statusTimer = setInterval(fetchServiceStatus, 2000);
-});
-
-onUnmounted(() => {
-  if (statusTimer) clearInterval(statusTimer);
+  await requestWindowsTunElevation();
 });
 </script>
 

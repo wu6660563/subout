@@ -380,6 +380,15 @@ pub struct PingResponse {
     pub latency: Option<u64>,
     pub tcp_latency: Option<u64>,
     pub web_latency: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo: Option<GeoInfo>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct GeoInfo {
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub ip: Option<String>,
 }
 
 struct SingBoxGuard {
@@ -437,15 +446,19 @@ async fn test_transport_latency(server: &str, port: u16, node_type: &str) -> Opt
     }
 }
 
-pub async fn test_node_web_latency(
+async fn probe_node_urls(
     raw_json: String,
     target_url: String,
     sem: Arc<Semaphore>,
-) -> Option<u64> {
+    include_geo: bool,
+) -> Option<(Option<(u16, u64, String)>, Option<GeoInfo>)> {
     let singbox_bin = crate::kernel::get_singbox_executable()?;
+    crate::validate_site_test_http_url(&target_url).await.ok()?;
     let _permit = sem.acquire().await.ok()?;
 
-    tokio::time::timeout(Duration::from_secs(7), async {
+    // Allow the proxied request up to 10 seconds, plus a small margin for
+    // sing-box startup and local proxy readiness.
+    tokio::time::timeout(Duration::from_secs(12), async {
         // 1. Get a random free port
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
@@ -521,29 +534,129 @@ pub async fn test_node_web_latency(
             temp_file_path,
         };
 
-        let mut latency = None;
+        let mut result = None;
+        let mut geo = None;
         if ready {
-            let start = Instant::now();
             if let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{}", port))
                 && let Ok(client) = reqwest::Client::builder()
                     .proxy(proxy)
                     .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .redirect(reqwest::redirect::Policy::limited(10))
-                    .timeout(Duration::from_millis(5000))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(10))
                     .build()
-                    && let Ok(resp) = client.get(&target_url).send().await {
+                {
+                    let start = Instant::now();
+                    if let Ok(resp) = crate::get_site_test_http_response(&client, &target_url).await {
                         let status = resp.status().as_u16();
                         if status < 400 || status == 403 || status == 405 || status == 429 {
-                            latency = Some(start.elapsed().as_millis() as u64);
+                            let body = resp.text().await.unwrap_or_default();
+                            result = Some((status, start.elapsed().as_millis() as u64, body));
+                        }
+                        if include_geo
+                            && let Ok(geo_resp) = crate::get_site_test_http_response(&client, "https://ipwho.is/").await
+                        {
+                            let geo_status = geo_resp.status().as_u16();
+                            if geo_status < 400 || geo_status == 403 || geo_status == 405 || geo_status == 429 {
+                                geo = parse_geo_response(&geo_resp.text().await.unwrap_or_default());
+                            }
                         }
                     }
+                }
         }
 
-        latency
+        if result.is_some() || geo.is_some() {
+            Some((result, geo))
+        } else {
+            None
+        }
     })
     .await
     .ok()
     .flatten()
+}
+
+pub async fn test_node_web_latency(
+    raw_json: String,
+    target_url: String,
+    sem: Arc<Semaphore>,
+) -> Option<u64> {
+    probe_node_urls(raw_json, target_url, sem, false)
+        .await
+        .and_then(|(result, _)| result.map(|(_, latency, _)| latency))
+}
+
+async fn test_node_geo_only(raw_json: String, sem: Arc<Semaphore>) -> Option<GeoInfo> {
+    // ipapi requires the queried address in the path, so first obtain the
+    // node's actual egress IP through the same node proxy.
+    if let Some((Some((_, _, ip_body)), _)) = probe_node_urls(
+        raw_json.clone(),
+        "https://api.ipify.org?format=json".to_string(),
+        sem.clone(),
+        false,
+    )
+    .await
+    {
+        if let Ok(value) = serde_json::from_str::<Value>(&ip_body)
+            && let Some(ip) = value.get("ip").and_then(Value::as_str)
+            && let Some((Some((_, _, body)), _)) = probe_node_urls(
+                raw_json.clone(),
+                format!("https://ipapi.co/{}/json/", ip),
+                sem.clone(),
+                false,
+            )
+            .await
+            && let Some(geo) = parse_geo_response(&body)
+        {
+            return Some(geo);
+        }
+    }
+
+    // Different proxy providers may block one public geo service. Try the
+    // lightweight providers as fallbacks without changing the node.
+    for endpoint in [
+        "https://free.freeipapi.com/api/json/",
+        "https://freeipapi.com/api/json",
+        "https://ipwho.is/",
+        "https://ipinfo.io/json",
+    ] {
+        let Some((Some((_, _, body)), _)) =
+            probe_node_urls(raw_json.clone(), endpoint.to_string(), sem.clone(), false).await
+        else {
+            continue;
+        };
+        if let Some(geo) = parse_geo_response(&body) {
+            return Some(geo);
+        }
+    }
+    None
+}
+
+fn parse_geo_response(body: &str) -> Option<GeoInfo> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    if value.get("success").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let country = value
+        .get("country")
+        .or_else(|| value.get("country_name"))
+        .or_else(|| value.get("countryName"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let city = value
+        .get("city")
+        .or_else(|| value.get("city_name"))
+        .or_else(|| value.get("cityName"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let ip = value
+        .get("ip")
+        .or_else(|| value.get("ipAddress"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if country.is_none() && city.is_none() && ip.is_none() {
+        return None;
+    }
+    Some(GeoInfo { country, city, ip })
 }
 
 pub async fn ping_nodes(
@@ -556,7 +669,9 @@ pub async fn ping_nodes(
         .map_err(|s| (s, "未授权".to_string()))?;
 
     let test_type = payload.test_type.as_deref().unwrap_or("tcp");
-    if test_type == "web" && crate::kernel::get_singbox_executable().is_none() {
+    if matches!(test_type, "web" | "both" | "geo")
+        && crate::kernel::get_singbox_executable().is_none()
+    {
         return Err((
             StatusCode::BAD_REQUEST,
             "当前系统尚未安装 sing-box 内核，无法执行节点网页延迟测试。请先在【内核管理】中一键下载安装内核。".to_string(),
@@ -589,6 +704,11 @@ pub async fn ping_nodes(
     let target_url = payload
         .target_url
         .unwrap_or_else(|| "http://www.gstatic.com/generate_204".to_string());
+    if matches!(test_type, "web" | "both") {
+        crate::validate_site_test_http_url(&target_url)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("测速网址不安全: {}", e)))?;
+    }
 
     let mut tasks = Vec::new();
     if test_type == "web" {
@@ -601,6 +721,7 @@ pub async fn ping_nodes(
                         latency: None,
                         tcp_latency: None,
                         web_latency: None,
+                        geo: None,
                     }
                 }));
                 continue;
@@ -614,6 +735,7 @@ pub async fn ping_nodes(
                     latency,
                     tcp_latency: None,
                     web_latency: latency,
+                    geo: None,
                 }
             }));
         }
@@ -627,6 +749,7 @@ pub async fn ping_nodes(
                         latency: None,
                         tcp_latency: None,
                         web_latency: None,
+                        geo: None,
                     }
                 }));
                 continue;
@@ -644,6 +767,34 @@ pub async fn ping_nodes(
                     latency: web_latency.or(tcp_latency),
                     tcp_latency,
                     web_latency,
+                    geo: None,
+                }
+            }));
+        }
+    } else if test_type == "geo" {
+        let sem = Arc::new(Semaphore::new(8));
+        for (id, _server, _port, raw_json, _node_type) in nodes_to_ping {
+            if raw_json.is_empty() {
+                tasks.push(tokio::spawn(async move {
+                    PingResponse {
+                        id,
+                        latency: None,
+                        tcp_latency: None,
+                        web_latency: None,
+                        geo: None,
+                    }
+                }));
+                continue;
+            }
+            let sem = sem.clone();
+            tasks.push(tokio::spawn(async move {
+                let geo = test_node_geo_only(raw_json, sem).await;
+                PingResponse {
+                    id,
+                    latency: None,
+                    tcp_latency: None,
+                    web_latency: None,
+                    geo,
                 }
             }));
         }
@@ -657,6 +808,7 @@ pub async fn ping_nodes(
                         latency: None,
                         tcp_latency: None,
                         web_latency: None,
+                        geo: None,
                     }
                 }));
                 continue;
@@ -668,6 +820,7 @@ pub async fn ping_nodes(
                     latency,
                     tcp_latency: latency,
                     web_latency: None,
+                    geo: None,
                 }
             }));
         }
@@ -696,7 +849,28 @@ pub async fn ping_nodes(
                 "web" => (None, Some(item.web_latency.map(|v| v as i64).unwrap_or(-1))),
                 _ => (Some(item.tcp_latency.map(|v| v as i64).unwrap_or(-1)), None),
             };
-            let _ = db::update_node_ping_result(&conn, item.id, tcp, web, &now_str, target_url_opt);
+            let (geo_country, geo_city, geo_ip) = item
+                .geo
+                .as_ref()
+                .map(|geo| {
+                    (
+                        geo.country.as_deref(),
+                        geo.city.as_deref(),
+                        geo.ip.as_deref(),
+                    )
+                })
+                .unwrap_or((None, None, None));
+            let _ = db::update_node_ping_result(
+                &conn,
+                item.id,
+                tcp,
+                web,
+                &now_str,
+                target_url_opt,
+                geo_country,
+                geo_city,
+                geo_ip,
+            );
         }
     }
 
@@ -719,7 +893,7 @@ pub struct SiteTestResponse {
 
 async fn try_fetch_url(client: &reqwest::Client, url: &str) -> Option<(u16, u64)> {
     let start = Instant::now();
-    if let Ok(resp) = client.get(url).send().await {
+    if let Ok(resp) = crate::get_site_test_http_response(client, url).await {
         let status = resp.status().as_u16();
         let elapsed = start.elapsed().as_millis() as u64;
         Some((status, elapsed))
@@ -745,13 +919,22 @@ pub async fn test_site_reachability(
             error: Some("网址不能为空".to_string()),
         }));
     }
+    if let Err(err) = crate::validate_site_test_http_url(&url).await {
+        return Ok(Json(SiteTestResponse {
+            url,
+            status_code: None,
+            latency: None,
+            success: false,
+            error: Some(format!("不允许测试该网址: {}", err)),
+        }));
+    }
 
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
     // 1. Try standard client (uses environment proxy / TUN mode / direct sockets)
     if let Ok(client) = reqwest::Client::builder()
         .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(8))
         .build()
         && let Some((status, elapsed)) = try_fetch_url(&client, &url).await
@@ -784,7 +967,7 @@ pub async fn test_site_reachability(
             && let Ok(client) = reqwest::Client::builder()
                 .proxy(proxy)
                 .user_agent(user_agent)
-                .redirect(reqwest::redirect::Policy::limited(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(6))
                 .build()
             && let Some((status, elapsed)) = try_fetch_url(&client, &url).await
@@ -807,4 +990,35 @@ pub async fn test_site_reachability(
         success: false,
         error: Some("网络无法在 10 秒内连通目标网站，请确认外部代理软件已正常连接".to_string()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_geo_response;
+
+    #[test]
+    fn parses_ipwho_response() {
+        let geo =
+            parse_geo_response(r#"{"success":true,"ip":"1.2.3.4","country":"中国","city":"上海"}"#)
+                .expect("valid geo response");
+        assert_eq!(geo.country.as_deref(), Some("中国"));
+        assert_eq!(geo.city.as_deref(), Some("上海"));
+        assert_eq!(geo.ip.as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn parses_free_ip_api_response() {
+        let geo =
+            parse_geo_response(r#"{"ipAddress":"1.2.3.4","countryName":"中国","cityName":"上海"}"#)
+                .expect("valid fallback geo response");
+        assert_eq!(geo.country.as_deref(), Some("中国"));
+        assert_eq!(geo.city.as_deref(), Some("上海"));
+        assert_eq!(geo.ip.as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn rejects_unsuccessful_or_non_geo_response() {
+        assert!(parse_geo_response(r#"{"success":false}"#).is_none());
+        assert!(parse_geo_response(r#"{"status":"forbidden"}"#).is_none());
+    }
 }

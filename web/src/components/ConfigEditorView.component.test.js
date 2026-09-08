@@ -16,6 +16,7 @@ const {
   mockServiceStatus,
   mockSystemModeInfo,
   mockSessionSudoPassword,
+  mockFetchServiceStatus,
 } = vi.hoisted(() => {
   // 在 hoisted 内部用 require 拿到 ref（vitest 支持 CommonJS require）
   const { ref } = require("vue");
@@ -28,6 +29,7 @@ const {
     mockServiceStatus: ref({ conflicting_processes: [] }),
     mockSystemModeInfo: ref({}),
     mockSessionSudoPassword: ref(""),
+    mockFetchServiceStatus: vi.fn(async () => {}),
   };
 });
 
@@ -41,6 +43,7 @@ vi.mock("../store.js", () => ({
   systemModeInfo: mockSystemModeInfo,
   sessionSudoPassword: mockSessionSudoPassword,
   setSessionSudoPassword: vi.fn(),
+  fetchServiceStatus: mockFetchServiceStatus,
 }));
 
 vi.mock("../validator.js", () => ({
@@ -961,6 +964,7 @@ describe("ConfigEditorView - groupImportModal 交互", () => {
       await flushPromises();
 
       expect(mockShowToast).toHaveBeenCalledWith("运行配置更新成功！");
+      expect(mockFetchServiceStatus).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -232,6 +232,8 @@
                 <th>服务器地址</th>
                 <th>端口</th>
                 <th>类型</th>
+                <th>国家</th>
+                <th>城市</th>
                 <th style="width: 100px">延迟</th>
                 <th style="text-align: right">操作</th>
               </tr>
@@ -284,6 +286,18 @@
                   {{ node.port }}
                 </td>
                 <td>{{ node.subscription_id ? "动态订阅" : "自定义" }}</td>
+                <td>
+                  <span v-if="getNodeGeo(node)?.country" class="badge">
+                    {{ countryLabel(getNodeGeo(node).country) }}
+                  </span>
+                  <span v-else style="color: var(--text-muted)">未拨测</span>
+                </td>
+                <td>
+                  <span v-if="getNodeGeo(node)?.city">
+                    {{ getNodeGeo(node).city }}
+                  </span>
+                  <span v-else style="color: var(--text-muted)">-</span>
+                </td>
                 <td>
                   <!-- Check if testing -->
                   <span
@@ -441,7 +455,7 @@
               </tr>
               <tr v-if="nodes.length === 0">
                 <td
-                  colspan="10"
+                  colspan="12"
                   style="text-align: center; color: var(--text-muted)"
                 >
                   节点池为空，或者没有匹配的节点。
@@ -1190,6 +1204,7 @@
               <option value="both">全部 (先测 TCP 再测网页)</option>
               <option value="tcp">TCP 连通性测试 (快速)</option>
               <option value="web">网页延迟测试 (代理)</option>
+              <option value="geo">国家/城市信息探测（低频）</option>
             </select>
           </div>
 
@@ -1235,7 +1250,7 @@
           <div
             v-if="
               !systemModeInfo.kernel_installed &&
-              ['web', 'both'].includes(pingModal.testType)
+              ['web', 'both', 'geo'].includes(pingModal.testType)
             "
             style="
               margin-bottom: 1.25rem;
@@ -1252,7 +1267,7 @@
             <code>sing-box</code>
             内核。无法启动本地代理测试通道（网页测速将被跳过，仅执行传输层
             TCP/UDP
-            连通性测试）。如需测试真实网页访问速度，请先前往【内核管理】一键下载安装内核。
+            连通性测试）。如需测试真实网页访问速度或国家/城市信息，请先前往【内核管理】一键下载安装内核。
           </div>
 
           <div
@@ -1282,7 +1297,7 @@
               "
             >
               <option
-                v-for="opt in TARGET_URL_OPTIONS"
+                v-for="opt in visibleTargetUrlOptions"
                 :key="opt.url"
                 :value="opt.url"
               >
@@ -1555,6 +1570,8 @@ const subList = ref([]);
 const totalNodes = ref(0);
 const selectedNodeIds = ref([]);
 const latencyMap = ref({});
+// 出口地理位置与延迟分开缓存；国家字段可供分流出站组筛选，城市仅用于展示。
+const geoMap = ref({});
 
 const nodePage = ref(1);
 const nodeLimit = ref(10);
@@ -1598,7 +1615,38 @@ const TARGET_URL_OPTIONS = [
     label: "Ubuntu/Canonical",
     url: "http://connectivity-check.ubuntu.com",
   },
+  {
+    label: "IP 查询（ipwho.is：国家/城市）",
+    url: "https://ipwho.is/",
+  },
+  {
+    label: "IP 查询（FreeIPAPI：国家/城市）",
+    url: "https://freeipapi.com/api/json",
+  },
+  {
+    label: "IP 查询（FreeIPAPI 免费域名：国家/城市）",
+    url: "https://free.freeipapi.com/api/json/",
+  },
+  {
+    label: "IP 查询（IPinfo：国家/城市）",
+    url: "https://ipinfo.io/json",
+  },
 ];
+
+const IP_LOOKUP_URLS = new Set([
+  "https://ipwho.is/",
+  "https://freeipapi.com/api/json",
+  "https://free.freeipapi.com/api/json/",
+  "https://ipinfo.io/json",
+]);
+
+const visibleTargetUrlOptions = computed(() => {
+  // “全部”只需要 TCP + 常规网页连通性，隐藏 IP 地理接口，避免误选。
+  if (pingModal?.testType === "both") {
+    return TARGET_URL_OPTIONS.filter((opt) => !IP_LOOKUP_URLS.has(opt.url));
+  }
+  return TARGET_URL_OPTIONS;
+});
 
 const getNodeTargetUrl = (node) => {
   const mapItem = latencyMap.value[node.id];
@@ -1613,6 +1661,29 @@ const getNodeTargetUrlDisplay = (node) => {
   if (!url) return "";
   const found = TARGET_URL_OPTIONS.find((opt) => opt.url === url);
   return found ? found.label : url;
+};
+
+const getNodeGeo = (node) => geoMap.value[node.id] || null;
+
+const countryLabel = (country) => {
+  if (!country) return "";
+  const labels = {
+    China: "中国",
+    Japan: "日本",
+    Singapore: "新加坡",
+    "United States": "美国",
+    "United Kingdom": "英国",
+    Korea: "韩国",
+    "South Korea": "韩国",
+    Germany: "德国",
+    France: "法国",
+    Canada: "加拿大",
+    Australia: "澳大利亚",
+    "Hong Kong": "中国香港",
+    Macao: "中国澳门",
+    Taiwan: "中国台湾",
+  };
+  return labels[country] || country;
 };
 
 const isAllSelected = computed(() => {
@@ -1688,9 +1759,12 @@ const loadNodes = async () => {
             (node.last_tcp_latency !== null &&
               node.last_tcp_latency !== undefined) ||
             (node.last_web_latency !== null &&
-              node.last_web_latency !== undefined) ||
+            node.last_web_latency !== undefined) ||
             node.last_tested_at ||
-            node.last_target_url
+            node.last_target_url ||
+            node.geo_country ||
+            node.geo_city ||
+            node.geo_ip
           ) {
             latencyMap.value[node.id] = {
               tcp:
@@ -1711,6 +1785,13 @@ const loadNodes = async () => {
               target_url: node.last_target_url,
             };
           }
+        }
+        if (node.geo_country || node.geo_city || node.geo_ip) {
+          geoMap.value[node.id] = {
+            country: node.geo_country || null,
+            city: node.geo_city || null,
+            ip: node.geo_ip || null,
+          };
         }
       });
     } else {
@@ -2384,6 +2465,16 @@ watch(
   },
 );
 
+watch(
+  () => pingModal.testType,
+  (type) => {
+    if (type === "both" && IP_LOOKUP_URLS.has(pingModal.targetUrlSelect)) {
+      pingModal.targetUrlSelect = "http://www.gstatic.com/generate_204";
+      pingModal.customTargetUrl = "";
+    }
+  },
+);
+
 const loadAllNodesForSelect = async () => {
   try {
     const res = await fetch(`${API_BASE}/api/nodes?page=1&limit=999999`, {
@@ -2562,6 +2653,7 @@ const pingSingleNode = async (id, bypassTunCheck = false) => {
 };
 
 const startPingTests = async (bypassTunCheck = false) => {
+  if (pingModal.isTesting) return;
   let targetNodeIds = [];
   if (pingModal.testRange === "selected") {
     targetNodeIds = [...selectedNodeIds.value];
@@ -2584,9 +2676,16 @@ const startPingTests = async (bypassTunCheck = false) => {
     return;
   }
 
-  if (!systemModeInfo.value.kernel_installed && pingModal.testType === "web") {
+  // A node must enter the queue only once, even if an upstream list contains
+  // duplicate records or the start action is triggered more than once.
+  targetNodeIds = [...new Set(targetNodeIds)];
+
+  if (
+    !systemModeInfo.value.kernel_installed &&
+    ["web", "both", "geo"].includes(pingModal.testType)
+  ) {
     showToast(
-      "当前系统未安装 sing-box 内核，无法执行网页测速。请先前往【内核管理】下载内核。",
+      "当前系统未安装 sing-box 内核，无法执行网页测速或国家/城市探测。请先前往【内核管理】下载内核。",
       "warning",
     );
     pingModal.logs = [
@@ -2633,7 +2732,7 @@ const startPingTests = async (bypassTunCheck = false) => {
           : {}),
         web: "testing",
       };
-    } else {
+    } else if (pingModal.testType !== "geo") {
       // both
       latencyMap.value[id] = {
         tcp: "testing",
@@ -2644,7 +2743,11 @@ const startPingTests = async (bypassTunCheck = false) => {
 
   const queue = [...targetNodeIds];
   let activeCount = 0;
-  const concurrency = ["web", "both"].includes(pingModal.testType) ? 3 : 10;
+  const concurrency = ["web", "both"].includes(pingModal.testType)
+    ? 3
+    : pingModal.testType === "geo"
+      ? 6
+      : 10;
 
   const runNext = async () => {
     if (queue.length === 0 || !pingModal.isTesting) return;
@@ -2681,6 +2784,9 @@ const startPingTests = async (bypassTunCheck = false) => {
         const results = await res.json();
         const item = results[0];
         if (item) {
+          if (item.geo) {
+            geoMap.value[id] = item.geo;
+          }
           if (pingModal.testType === "both") {
             const tcp = item.tcp_latency;
             const web = item.web_latency;
@@ -2733,6 +2839,17 @@ const startPingTests = async (bypassTunCheck = false) => {
               pingModal.statusMap[id] = "failed";
               pingModal.logs.push(`[${node.tag}] 网页测试失败 (超时或无连接)`);
             }
+          } else if (pingModal.testType === "geo") {
+            if (item.geo) {
+              geoMap.value[id] = item.geo;
+              pingModal.statusMap[id] = "success";
+              const country = countryLabel(item.geo.country) || "未知国家";
+              const city = item.geo.city || "未知城市";
+              pingModal.logs.push(`[${node.tag}] 出口位置: ${country} / ${city}`);
+            } else {
+              pingModal.statusMap[id] = "failed";
+              pingModal.logs.push(`[${node.tag}] 国家/城市信息获取失败`);
+            }
           } else {
             const latency = item.latency;
             const latObj =
@@ -2774,7 +2891,7 @@ const startPingTests = async (bypassTunCheck = false) => {
       pingModal.logs.push(`[${node.tag}] 网络错误: ${e.message || e}`);
     } finally {
       activeCount--;
-      pingModal.progress++;
+      pingModal.progress = Math.min(pingModal.progress + 1, pingModal.total);
       if (queue.length > 0 && pingModal.isTesting) {
         runNext();
       } else if (activeCount === 0) {

@@ -1,16 +1,15 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Html,
     routing::{get, post, put},
 };
 use rusqlite::Connection;
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
 
 use crate::db;
 
@@ -29,9 +28,11 @@ pub mod system;
 pub struct AppState {
     pub db_path: String,
     pub session_token: Arc<RwLock<Option<String>>>,
+    pub auth_disabled: Arc<RwLock<bool>>,
     pub kernel_download_status: Arc<RwLock<crate::kernel::KernelDownloadStatus>>,
     pub kernel_download_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub service_manager: Arc<crate::service::SingBoxServiceManager>,
+    pub shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,18 +63,22 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
     let service_manager = Arc::new(crate::service::SingBoxServiceManager::new());
     service_manager.set_db_path(&db_path).await;
     service_manager.load_saved_sudo_pass().await;
+    let auth_disabled =
+        db::get_setting(&_conn, "auth_disabled")?.is_some_and(|value| value == "true");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let state = AppState {
         db_path: db_path.clone(),
         session_token: Arc::new(RwLock::new(None)),
+        auth_disabled: Arc::new(RwLock::new(auth_disabled)),
         kernel_download_status: Arc::new(RwLock::new(
             crate::kernel::KernelDownloadStatus::default(),
         )),
         kernel_download_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         service_manager,
+        shutdown_tx: shutdown_tx.clone(),
     };
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let db_path_clone = db_path.clone();
     let service_mgr_clone = state.service_manager.clone();
@@ -116,6 +121,7 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         .route("/api/auth/change-password", post(auth::change_password))
         // Settings APIs
         .route("/api/settings", get(settings::get_settings))
+        .route("/api/settings/auth", post(settings::save_auth_settings))
         .route("/api/settings/sudo", post(settings::save_sudo_password))
         .route(
             "/api/settings/auto-update",
@@ -212,6 +218,11 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         )
         .route("/api/system/dirs", get(system::get_system_dirs))
         .route("/api/system/initialize", post(system::initialize_db))
+        .route(
+            "/api/system/tun-elevation",
+            get(system::get_tun_elevation_status),
+        )
+        .route("/api/system/elevate", post(system::elevate_for_tun))
         // Kernel Management APIs
         .route("/api/kernel/info", get(kernel_api::get_kernel_info))
         .route("/api/kernel/status", get(kernel_api::get_kernel_status))
@@ -244,7 +255,6 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             "/api/simple-config/preview",
             post(simple_api::preview_simple_config),
         )
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     // Determine if port is explicitly configured
@@ -264,10 +274,10 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
     }
 
     let listener = if let Some(p) = configured_port {
-        let addr = SocketAddr::from(([0, 0, 0, 0], p));
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, p));
         match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => {
-                println!("[Server] Subout Panel running on http://localhost:{}", p);
+                println!("[Server] Subout Panel running on http://127.0.0.1:{}", p);
                 l
             }
             Err(e) => {
@@ -278,11 +288,11 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         let mut bind_result = None;
         for i in 0..=10 {
             let try_port = 1234 + i;
-            let addr = SocketAddr::from(([0, 0, 0, 0], try_port));
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, try_port));
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(l) => {
                     println!(
-                        "[Server] Subout Panel running on http://localhost:{}",
+                        "[Server] Subout Panel running on http://127.0.0.1:{}",
                         try_port
                     );
                     bind_result = Some(l);
@@ -303,7 +313,7 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         }
     };
 
-    let shutdown_signal_rx = shutdown_rx.clone();
+    let mut shutdown_signal_rx = shutdown_rx.clone();
     let shutdown_signal = async move {
         let ctrl_c = async {
             tokio::signal::ctrl_c()
@@ -328,6 +338,7 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         tokio::select! {
             _ = ctrl_c => {},
             _ = terminate => {},
+            _ = shutdown_signal_rx.changed() => {},
         }
 
         println!("\n[Server] 正在停止服务并安全退出... (再次按 Ctrl+C 强制退出)");
@@ -349,20 +360,9 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         let _ = service_mgr_for_shutdown.stop().await;
     };
 
-    let mut shutdown_exit_rx = shutdown_signal_rx.clone();
     let serve_future = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
-
-    tokio::select! {
-        res = serve_future => {
-            if let Err(e) = res {
-                eprintln!("[Server] Web server error: {}", e);
-            }
-        }
-        _ = async {
-            let _ = shutdown_exit_rx.changed().await;
-            // Allow up to 300ms for active HTTP connections to flush before exiting
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        } => {}
+    if let Err(e) = serve_future.await {
+        eprintln!("[Server] Web server error: {}", e);
     }
 
     println!("[Server] 服务已安全关闭。");
@@ -379,6 +379,9 @@ pub fn get_db_conn(db_path: &str) -> Result<Connection, StatusCode> {
 
 // Auth Helper
 pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if *state.auth_disabled.read().await {
+        return Ok(());
+    }
     let Some(auth_header) = headers.get("Authorization") else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -399,8 +402,19 @@ pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), Sta
 }
 
 // UI Handler
-async fn serve_ui() -> Html<&'static str> {
-    Html(include_str!("../../web/dist/index.html"))
+async fn serve_ui() -> (
+    [(axum::http::HeaderName, &'static str); 1],
+    Html<&'static str>,
+) {
+    // 前端是内嵌在二进制中的单文件。禁止浏览器缓存入口 HTML，避免用户重启
+    // Subout 后仍由旧的 SPA 代码渲染页面，出现后端已更新而页面样式未更新的情况。
+    (
+        [(
+            header::CACHE_CONTROL,
+            "no-store, max-age=0, must-revalidate",
+        )],
+        Html(include_str!("../../web/dist/index.html")),
+    )
 }
 
 // Dashboard Handlers
@@ -435,4 +449,26 @@ async fn get_dashboard_stats(
         nodes,
         groups,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn check_auth_allows_requests_when_login_is_disabled() {
+        let state = AppState {
+            db_path: ":memory:".to_string(),
+            session_token: Arc::new(RwLock::new(None)),
+            auth_disabled: Arc::new(RwLock::new(true)),
+            kernel_download_status: Arc::new(RwLock::new(
+                crate::kernel::KernelDownloadStatus::default(),
+            )),
+            kernel_download_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            service_manager: Arc::new(crate::service::SingBoxServiceManager::new()),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
+        };
+
+        assert!(check_auth(&state, &HeaderMap::new()).await.is_ok());
+    }
 }

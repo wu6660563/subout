@@ -3,9 +3,9 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::web::{AppState, check_auth};
+use crate::web::{AppState, check_auth, get_db_conn};
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
@@ -16,6 +16,7 @@ pub struct SettingsResponse {
     pub is_macos: bool,
     pub binary_path: Option<String>,
     pub has_saved_sudo_pass: bool,
+    pub auth_disabled: bool,
 }
 
 pub async fn get_settings(
@@ -32,6 +33,7 @@ pub async fn get_settings(
     let binary_path =
         crate::kernel::get_singbox_executable().map(|p| p.to_string_lossy().to_string());
     let has_saved_sudo_pass = state.service_manager.has_saved_sudo_pass().await;
+    let auth_disabled = *state.auth_disabled.read().await;
     Ok(Json(SettingsResponse {
         is_password_env_set,
         is_root,
@@ -40,7 +42,47 @@ pub async fn get_settings(
         is_macos,
         binary_path,
         has_saved_sudo_pass,
+        auth_disabled,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct AuthSettingsRequest {
+    pub disabled: bool,
+}
+
+pub async fn save_auth_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AuthSettingsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&state, &headers)
+        .await
+        .map_err(|status| (status, "未授权".to_string()))?;
+
+    let conn =
+        get_db_conn(&state.db_path).map_err(|status| (status, "数据库连接失败".to_string()))?;
+    db::update_setting(
+        &conn,
+        "auth_disabled",
+        if payload.disabled { "true" } else { "false" },
+    )
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "保存登录设置失败".to_string(),
+        )
+    })?;
+
+    *state.auth_disabled.write().await = payload.disabled;
+    if payload.disabled {
+        *state.session_token.write().await = None;
+    }
+
+    Ok(Json(serde_json::json!({
+        "auth_disabled": payload.disabled,
+        "message": if payload.disabled { "已启用免登录访问" } else { "已恢复登录保护" }
+    })))
 }
 
 #[derive(Deserialize)]
@@ -80,8 +122,6 @@ pub async fn save_sudo_password(
 
 use crate::auto_update;
 use crate::db;
-use serde::Deserialize;
-
 #[derive(Deserialize)]
 pub struct AutoUpdateSettingsRequest {
     pub enabled: bool,

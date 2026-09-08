@@ -19,6 +19,80 @@ pub struct SystemInfoResponse {
     pub is_linux: bool,
 }
 
+#[derive(Serialize)]
+pub struct TunElevationStatusResponse {
+    pub required: bool,
+    pub is_elevated: bool,
+}
+
+async fn current_config_requires_windows_tun_elevation(
+    state: &AppState,
+) -> Result<(bool, bool), StatusCode> {
+    let platform = crate::platform::current_platform();
+    let is_elevated = platform.is_running_as_root();
+    if !platform.is_windows() || is_elevated {
+        return Ok((false, is_elevated));
+    }
+
+    let conn = get_db_conn(&state.db_path)?;
+    let mode = crate::db::get_setting(&conn, "app_mode")
+        .unwrap_or(None)
+        .unwrap_or_else(|| "simple".to_string());
+    let config = crate::web::service_api::get_config_for_mode(&conn, &mode)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((crate::service::is_tun_mode(&config), is_elevated))
+}
+
+pub async fn get_tun_elevation_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TunElevationStatusResponse>, StatusCode> {
+    check_auth(&state, &headers).await?;
+    let (required, is_elevated) = current_config_requires_windows_tun_elevation(&state).await?;
+    Ok(Json(TunElevationStatusResponse {
+        required,
+        is_elevated,
+    }))
+}
+
+pub async fn elevate_for_tun(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&state, &headers)
+        .await
+        .map_err(|status| (status, "未授权".to_string()))?;
+
+    let (required, _) = current_config_requires_windows_tun_elevation(&state)
+        .await
+        .map_err(|status| (status, "无法检查 TUN 提权状态".to_string()))?;
+    if !required {
+        return Ok(Json(serde_json::json!({
+            "status": "not_required",
+            "message": "当前配置不需要 Windows TUN 提权。"
+        })));
+    }
+
+    crate::platform::windows::relaunch_current_process_as_administrator(std::process::id())
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("无法启动管理员实例: {}", err),
+            )
+        })?;
+
+    let shutdown_tx = state.shutdown_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let _ = shutdown_tx.send(true);
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "elevating",
+        "message": "已请求 Windows 管理员权限，正在切换到管理员实例。"
+    })))
+}
+
 pub async fn get_system_info(
     State(state): State<AppState>,
     headers: HeaderMap,

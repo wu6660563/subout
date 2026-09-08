@@ -31,24 +31,8 @@
 
 ## 🚀 快速开始 (Quick Start)
 
-### 1. 方式 A：在线一键安装（推荐普通用户）
 
-脚本会自动识别操作系统与 CPU 架构，从 GitHub Releases 下载最新预编译包并配置开机自启后台守护服务：
-
-* **Linux & macOS (Bash)**:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/geekdex/subout/main/install.sh | bash
-  ```
-* **Windows (PowerShell 管理员)**:
-  ```powershell
-  irm https://raw.githubusercontent.com/geekdex/subout/main/install.ps1 | iex
-  ```
-
-安装成功后打开浏览器访问：`http://127.0.0.1:1234`（默认登录密码：`admin`）。
-
----
-
-### 2. 方式 B：开发者源码本地编译安装（推荐二次开发）
+### 开发者源码本地编译安装（推荐二次开发）
 
 在源码目录下直接执行安装脚本，会自动进入 `web` 执行 `pnpm build` 前端打包，并返回根目录执行 `cargo build --release` 后覆盖安装并重启服务：
 
@@ -93,19 +77,6 @@
 
 </details>
 
-<details open>
-<summary><b>▦ Windows (PowerShell 管理员)</b></summary>
-
-| 操作需求 | 执行命令 |
-| :--- | :--- |
-| **查看运行状态** | `Get-ScheduledTask -TaskName Subout` |
-| **启动后台任务** | `Start-ScheduledTask -TaskName Subout` |
-| **停止后台任务** | `Stop-ScheduledTask -TaskName Subout` |
-| **重启后台任务** | `Stop-ScheduledTask -TaskName Subout; Start-ScheduledTask -TaskName Subout` |
-| **一键卸载 (保留数据)** | `.\install.ps1 uninstall` |
-| **彻底卸载 (清理数据)** | `.\install.ps1 uninstall -Purge` |
-
-</details>
 
 ---
 

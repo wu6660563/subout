@@ -14,6 +14,7 @@ struct CliArgs {
     runtime_dir: Option<String>,
     kernel_path: Option<String>,
     portable: bool,
+    wait_for_parent: Option<u32>,
 }
 
 fn parse_args() -> Result<CliArgs, String> {
@@ -30,6 +31,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut runtime_dir = None;
     let mut kernel_path = None;
     let mut portable = false;
+    let mut wait_for_parent = None;
 
     // Check if the first argument is a subcommand 'web' or 'server'
     if let Some(arg) = std::env::args().nth(1)
@@ -111,6 +113,15 @@ fn parse_args() -> Result<CliArgs, String> {
             "--portable" => {
                 portable = true;
             }
+            "--wait-for-parent" => {
+                let Some(pid) = args_iter.next() else {
+                    return Err("Error: Parameter '--wait-for-parent' requires a PID.".to_string());
+                };
+                wait_for_parent = Some(
+                    pid.parse::<u32>()
+                        .map_err(|_| format!("Error: Invalid parent PID '{}'.", pid))?,
+                );
+            }
             "web" | "server" => {
                 web = true;
             }
@@ -147,6 +158,7 @@ fn parse_args() -> Result<CliArgs, String> {
         runtime_dir,
         kernel_path,
         portable,
+        wait_for_parent,
     })
 }
 
@@ -192,6 +204,10 @@ async fn main() {
         return;
     }
 
+    if let Some(parent_pid) = args.wait_for_parent {
+        wait_for_parent_exit(parent_pid);
+    }
+
     // Initialize global paths with CLI overrides
     subout::paths::AppPaths::init(
         args.config_dir.as_ref().map(std::path::PathBuf::from),
@@ -214,6 +230,34 @@ async fn main() {
             std::process::exit(1);
         }
         std::process::exit(0);
+    }
+}
+
+fn wait_for_parent_exit(parent_pid: u32) {
+    #[cfg(windows)]
+    {
+        type Handle = *mut std::ffi::c_void;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x0000_0102;
+
+        unsafe extern "system" {
+            fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+            fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+            fn CloseHandle(handle: Handle) -> i32;
+        }
+
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, parent_pid) };
+        if !handle.is_null() {
+            let result = unsafe { WaitForSingleObject(handle, 15_000) };
+            unsafe { CloseHandle(handle) };
+            if result == WAIT_TIMEOUT {
+                eprintln!("[Elevation] 等待原 Subout 进程退出超时，将继续启动管理员实例。");
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = parent_pid;
     }
 }
 

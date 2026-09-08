@@ -206,6 +206,22 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE nodes ADD COLUMN last_target_url TEXT", []);
     }
 
+    for col in ["geo_country", "geo_city", "geo_ip", "geo_tested_at"] {
+        let has_col: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='{}'",
+                    col
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_col == 0 {
+            let _ = conn.execute(&format!("ALTER TABLE nodes ADD COLUMN {} TEXT", col), []);
+        }
+    }
+
     // Migration: check if outbound_groups has dynamic filter columns
     for col in &[
         "node_types",
@@ -432,7 +448,7 @@ pub fn get_nodes_paginated(
     let total_count: i64 = conn.query_row(&count_query, params_slice.as_slice(), |r| r.get(0))?;
 
     let query_str = format!(
-        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url 
+        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url, n.geo_country, n.geo_city, n.geo_ip, n.geo_tested_at 
          FROM nodes n
          LEFT JOIN subscriptions s ON n.subscription_id = s.id
          {} 
@@ -477,6 +493,10 @@ pub fn get_nodes_paginated(
                 last_web_latency: row.get(11)?,
                 last_tested_at: row.get(12)?,
                 last_target_url: row.get(13)?,
+                geo_country: row.get(14)?,
+                geo_city: row.get(15)?,
+                geo_ip: row.get(16)?,
+                geo_tested_at: row.get(17)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -486,7 +506,7 @@ pub fn get_nodes_paginated(
 
 pub fn get_nodes(conn: &Connection) -> Result<Vec<Node>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url 
+        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url, n.geo_country, n.geo_city, n.geo_ip, n.geo_tested_at 
          FROM nodes n
          LEFT JOIN subscriptions s ON n.subscription_id = s.id"
     )?;
@@ -518,6 +538,10 @@ pub fn get_nodes(conn: &Connection) -> Result<Vec<Node>> {
                 last_web_latency: row.get(11)?,
                 last_tested_at: row.get(12)?,
                 last_target_url: row.get(13)?,
+                geo_country: row.get(14)?,
+                geo_city: row.get(15)?,
+                geo_ip: row.get(16)?,
+                geo_tested_at: row.get(17)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -526,7 +550,7 @@ pub fn get_nodes(conn: &Connection) -> Result<Vec<Node>> {
 
 pub fn get_node_by_id(conn: &Connection, id: i64) -> Result<Option<Node>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url 
+        "SELECT n.id, n.subscription_id, s.label, n.tag, n.node_type, n.server, n.port, n.raw_json, n.enabled, n.is_custom, n.last_tcp_latency, n.last_web_latency, n.last_tested_at, n.last_target_url, n.geo_country, n.geo_city, n.geo_ip, n.geo_tested_at 
          FROM nodes n
          LEFT JOIN subscriptions s ON n.subscription_id = s.id
          WHERE n.id = ?"
@@ -559,6 +583,10 @@ pub fn get_node_by_id(conn: &Connection, id: i64) -> Result<Option<Node>> {
             last_web_latency: row.get(11)?,
             last_tested_at: row.get(12)?,
             last_target_url: row.get(13)?,
+            geo_country: row.get(14)?,
+            geo_city: row.get(15)?,
+            geo_ip: row.get(16)?,
+            geo_tested_at: row.get(17)?,
         }))
     } else {
         Ok(None)
@@ -572,6 +600,9 @@ pub fn update_node_ping_result(
     web_latency: Option<i64>,
     tested_at: &str,
     target_url: Option<&str>,
+    geo_country: Option<&str>,
+    geo_city: Option<&str>,
+    geo_ip: Option<&str>,
 ) -> Result<()> {
     match (tcp_latency, web_latency) {
         (Some(tcp), Some(web)) => {
@@ -593,6 +624,12 @@ pub fn update_node_ping_result(
             )?;
         }
         (None, None) => {}
+    }
+    if geo_country.is_some() || geo_city.is_some() || geo_ip.is_some() {
+        conn.execute(
+            "UPDATE nodes SET geo_country = COALESCE(?, geo_country), geo_city = COALESCE(?, geo_city), geo_ip = COALESCE(?, geo_ip), geo_tested_at = ? WHERE id = ?",
+            params![geo_country, geo_city, geo_ip, tested_at, id],
+        )?;
     }
     Ok(())
 }

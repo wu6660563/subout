@@ -5356,6 +5356,7 @@ import {
   setSessionSudoPassword,
   systemModeInfo,
   serviceStatus,
+  fetchServiceStatus,
 } from "../store.js";
 import { validateData } from "../validator.js";
 import { filterGroupsByQuery, clearSearchQuery } from "../utils/groupImport.js";
@@ -5840,8 +5841,12 @@ const hasDuplicateInField = (category, fieldValue) => {
 
 const outboundGroups = ref([]);
 const nodePoolCache = ref([]);
+let nodePoolCachePromise = null;
 
 const loadNodePoolCache = async () => {
+  if (nodePoolCache.value.length > 0) return nodePoolCache.value;
+  if (nodePoolCachePromise) return nodePoolCachePromise;
+  nodePoolCachePromise = (async () => {
   try {
     const res = await fetch(`${API_BASE}/api/nodes?limit=100000`, {
       headers: { Authorization: `Bearer ${token.value}` },
@@ -5852,7 +5857,12 @@ const loadNodePoolCache = async () => {
     }
   } catch (e) {
     console.error("加载节点池缓存失败", e);
+  } finally {
+    nodePoolCachePromise = null;
   }
+  return nodePoolCache.value;
+  })();
+  return nodePoolCachePromise;
 };
 
 const allOutboundTags = computed(() => {
@@ -7502,6 +7512,9 @@ watch(pageSize, () => {
 });
 
 const startEditConfig = async (id) => {
+  // 配置列表不需要完整节点池；真正进入编辑时才加载，避免点击“配置管理”
+  // 被大量节点 JSON 的下载和解析阻塞。
+  await loadNodePoolCache();
   await selectConfig(id);
   isEditing.value = true;
   const targetHash = `#configs/edit/${id}/${activeSection.value}`;
@@ -7855,23 +7868,25 @@ const duplicateConfigItem = async (id) => {
 };
 
 const loadAllSections = async () => {
-  await fetchSystemInfo();
-  try {
-    const resGroups = await fetch(`${API_BASE}/api/groups`, {
-      headers: { Authorization: `Bearer ${token.value}` },
-    });
-    if (resGroups.ok) {
-      outboundGroups.value = await resGroups.json();
-    }
-  } catch (e) {
-    console.error("加载出站组失败", e);
-  }
-
-  // 加载节点池缓存（用于出站组完整展开导入与旧配置迁移）
-  await loadNodePoolCache();
-
-  await loadRunningConfigSettings();
-  await loadConfigList();
+  // 列表页的四项轻量数据彼此独立，避免原先的串行请求累加成 2–3 秒等待。
+  // 全量节点池只在实际编辑配置时加载。
+  await Promise.all([
+    fetchSystemInfo(),
+    (async () => {
+      try {
+        const resGroups = await fetch(`${API_BASE}/api/groups`, {
+          headers: { Authorization: `Bearer ${token.value}` },
+        });
+        if (resGroups.ok) {
+          outboundGroups.value = await resGroups.json();
+        }
+      } catch (e) {
+        console.error("加载出站组失败", e);
+      }
+    })(),
+    loadRunningConfigSettings(),
+    loadConfigList(),
+  ]);
 
   const routeState = parseConfigRoute();
   if (routeState.isEditing && routeState.configId) {
@@ -7883,6 +7898,7 @@ const loadAllSections = async () => {
       if (routeState.tab && sections.includes(routeState.tab)) {
         activeSection.value = routeState.tab;
       }
+      await loadNodePoolCache();
       await selectConfig(routeState.configId);
       isEditing.value = true;
       return;
@@ -9383,6 +9399,10 @@ const saveRunningConfigSettings = async (
           if (sudoPass) {
             setSessionSudoPassword(sudoPass);
           }
+          // The service restart has completed on the backend. Refresh the
+          // shared status immediately so every view reflects the new state
+          // without requiring a browser refresh.
+          await fetchServiceStatus();
           await loadRunningConfigSettings();
         } else {
           runningConfigModal.status = "failed";

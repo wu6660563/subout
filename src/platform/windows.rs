@@ -1,11 +1,72 @@
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::platform::{BoxFuture, PlatformStrategy};
 use crate::service::ConflictingProcessInfo;
 
 pub struct WindowsPlatform;
+
+pub fn relaunch_current_process_as_administrator(parent_pid: u32) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|err| anyhow::anyhow!("无法定位 Subout 可执行文件: {}", err))?;
+        let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let mut args = Vec::with_capacity(raw_args.len() + 2);
+        let mut index = 0;
+        while index < raw_args.len() {
+            if raw_args[index].to_string_lossy() == "--wait-for-parent" {
+                // This hidden argument always owns the following PID. Do not
+                // pass an old one through when an administrator instance is
+                // restarted again.
+                index += 2;
+            } else {
+                args.push(raw_args[index].clone());
+                index += 1;
+            }
+        }
+
+        args.push(OsString::from("--wait-for-parent"));
+        args.push(OsString::from(parent_pid.to_string()));
+
+        let quoted_args = args
+            .iter()
+            .map(|arg| powershell_quote(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let command = format!(
+            "Start-Process -FilePath {} -ArgumentList @({}) -Verb RunAs -ErrorAction Stop",
+            powershell_quote(&executable.to_string_lossy()),
+            quoted_args
+        );
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .output()
+            .map_err(|err| anyhow::anyhow!("无法请求 Windows 管理员权限: {}", err))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = if stderr.is_empty() {
+                "用户取消了管理员权限请求，或 Windows 未能启动管理员实例。".to_string()
+            } else {
+                format!("管理员权限请求失败: {}", stderr)
+            };
+            return Err(anyhow::anyhow!(message));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = parent_pid;
+        Err(anyhow::anyhow!("仅 Windows 支持 UAC 重新启动"))
+    }
+}
+
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
 
 impl PlatformStrategy for WindowsPlatform {
     fn os_name(&self) -> &'static str {
@@ -391,21 +452,6 @@ impl PlatformStrategy for WindowsPlatform {
                     }
                 } else {
                     obj.insert("stack".to_string(), json!("mixed"));
-                }
-
-                // Ensure IPv6 dual-stack address is present on Windows to prevent leakage
-                if let Some(addr_arr) = obj.get_mut("address").and_then(|v| v.as_array_mut()) {
-                    let has_ipv6 = addr_arr
-                        .iter()
-                        .any(|a| a.as_str().is_some_and(|s| s.contains(':')));
-                    if !has_ipv6 {
-                        addr_arr.push(json!("fd00::1/126"));
-                    }
-                } else {
-                    obj.insert(
-                        "address".to_string(),
-                        json!(["172.19.0.1/30", "fd00::1/126"]),
-                    );
                 }
 
                 // Windows strict_route MUST be true

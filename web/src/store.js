@@ -1,6 +1,7 @@
 import { ref, reactive } from "vue";
 
 export const API_BASE = "";
+export const PUBLIC_ACCESS_TOKEN = "__subout_public_access__";
 export const token = ref(
   typeof localStorage !== "undefined"
     ? localStorage.getItem("admin_token") || ""
@@ -87,6 +88,21 @@ export const serviceStatus = ref({
   log_disabled: false,
   log_output: null,
 });
+
+// 状态轮询、启动/停止后的手动刷新可能同时在途。只允许最新发起的请求
+// 写入状态，避免较早的“未运行”响应在服务已启动后覆盖界面。
+let serviceStatusRequestSequence = 0;
+
+/**
+ * 写入服务操作（启动、停止、重启）刚刚确认的权威状态。
+ * 同时作废已在途的轮询请求，避免旧响应把操作结果覆盖掉。
+ */
+export function setServiceStatus(status) {
+  serviceStatusRequestSequence += 1;
+  if (status && typeof status === "object") {
+    serviceStatus.value = status;
+  }
+}
 
 export const toast = reactive({
   message: "",
@@ -179,18 +195,24 @@ export async function fetchKernelInfo() {
 }
 
 export async function fetchServiceStatus() {
-  if (!token.value) return;
+  if (!token.value) return serviceStatus.value;
+  const requestSequence = ++serviceStatusRequestSequence;
   try {
     const res = await fetch(`${API_BASE}/api/service/status`, {
       headers: { Authorization: `Bearer ${token.value}` },
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
-      serviceStatus.value = await res.json();
+      const nextStatus = await res.json();
+      if (requestSequence === serviceStatusRequestSequence) {
+        setServiceStatus(nextStatus);
+      }
+      return nextStatus;
     }
   } catch (e) {
     console.error("Failed to load service status", e);
   }
+  return serviceStatus.value;
 }
 
 export async function killExternalProcess(pid, sudoPass = "") {

@@ -89,6 +89,41 @@
       </div>
     </div>
 
+    <div class="panel" style="margin-top: 1.5rem">
+      <div class="panel-title">访问控制</div>
+      <p
+        style="
+          color: var(--text-muted);
+          font-size: 0.9rem;
+          line-height: 1.5;
+          margin: 0 0 1rem;
+        "
+      >
+        默认需要管理员登录，打开本面板和调用管理 API 都会校验登录状态。启用免登录访问后，将跳过这些校验。
+        <strong style="color: var(--danger)"
+          >请仅在本机或受信任网络中使用。</strong
+        >
+      </p>
+      <label
+        style="
+          display: inline-flex;
+          align-items: center;
+          gap: 0.65rem;
+          cursor: pointer;
+          font-weight: 500;
+        "
+      >
+        <input
+          v-model="authDisabled"
+          type="checkbox"
+          :disabled="savingAuthSettings"
+          style="width: 18px; height: 18px; cursor: pointer"
+          @change="saveAuthSettings"
+        />
+        <span>启用免登录访问</span>
+      </label>
+    </div>
+
     <!-- Automatic Configuration Update Panel (Expert Mode Only) -->
     <div v-if="appMode === 'expert'" class="panel" style="margin-top: 1.5rem">
       <div
@@ -476,6 +511,8 @@ const passwords = reactive({
 
 const isPasswordEnvSet = ref(false);
 const initializing = ref(false);
+const authDisabled = ref(false);
+const savingAuthSettings = ref(false);
 
 const loadSettings = async () => {
   try {
@@ -485,9 +522,50 @@ const loadSettings = async () => {
     if (res.ok) {
       const data = await res.json();
       isPasswordEnvSet.value = data.is_password_env_set;
+      authDisabled.value = !!data.auth_disabled;
     }
   } catch {
     showToast("载入系统设置失败", "danger");
+  }
+};
+
+const saveAuthSettings = async () => {
+  const disabled = authDisabled.value;
+  if (
+    disabled &&
+    !(await confirmDialog(
+      "启用免登录后，任何能够访问此面板地址的人都可以修改订阅、配置及服务。确定继续吗？",
+      { title: "启用免登录访问", confirmText: "确认启用", isDanger: true },
+    ))
+  ) {
+    authDisabled.value = false;
+    return;
+  }
+
+  savingAuthSettings.value = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/settings/auth`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token.value}`,
+      },
+      body: JSON.stringify({ disabled }),
+    });
+    if (!res.ok) {
+      authDisabled.value = !disabled;
+      showToast("登录设置保存失败", "danger");
+      return;
+    }
+    showToast(disabled ? "已启用免登录访问" : "已恢复登录保护");
+    if (!disabled) {
+      logout();
+    }
+  } catch {
+    authDisabled.value = !disabled;
+    showToast("登录设置保存请求出错", "danger");
+  } finally {
+    savingAuthSettings.value = false;
   }
 };
 

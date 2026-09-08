@@ -32,6 +32,10 @@ pub struct Node {
     pub last_web_latency: Option<i64>,
     pub last_tested_at: Option<String>,
     pub last_target_url: Option<String>,
+    pub geo_country: Option<String>,
+    pub geo_city: Option<String>,
+    pub geo_ip: Option<String>,
+    pub geo_tested_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

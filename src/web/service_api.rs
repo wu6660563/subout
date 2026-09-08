@@ -173,9 +173,14 @@ pub async fn start_service(
             }
         })?;
 
+    // 在同一请求里读取启动后状态。前端据此立即更新，而不是等待下一轮轮询；
+    // 这也避免了启动前已发出的“未运行”轮询响应覆盖新状态。
+    let service_status = state.service_manager.get_status().await;
+
     Ok(Json(serde_json::json!({
         "status": "success",
-        "message": "sing-box 服务已成功启动"
+        "message": "sing-box 服务已成功启动",
+        "service_status": service_status
     })))
 }
 
@@ -194,9 +199,14 @@ pub async fn stop_service(
         )
     })?;
 
+    // 与启动/重启接口保持一致：操作完成后直接返回最终状态，前端无需等待
+    // 下一轮异步轮询才能从“运行中”切换到“已停止”。
+    let service_status = state.service_manager.get_status().await;
+
     Ok(Json(serde_json::json!({
         "status": "success",
-        "message": "sing-box 服务已停止"
+        "message": "sing-box 服务已停止",
+        "service_status": service_status
     })))
 }
 
@@ -235,9 +245,14 @@ pub async fn restart_service(
             )
         })?;
 
+    // restart_with_sudo_and_takeover 在返回前已完成新进程的启动检查；把这个
+    // 同一时刻的状态返回，避免旧轮询结果短暂把页面显示为停止状态。
+    let service_status = state.service_manager.get_status().await;
+
     Ok(Json(serde_json::json!({
         "status": "success",
-        "message": "sing-box 服务已重启"
+        "message": "sing-box 服务已重启",
+        "service_status": service_status
     })))
 }
 

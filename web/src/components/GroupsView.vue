@@ -363,7 +363,7 @@
 
     <!-- Group Add/Edit Modal -->
     <div class="modal" :class="{ active: modal.show }">
-      <div class="modal-card" style="max-width: 950px; width: 92%">
+      <div class="modal-card group-editor-modal">
         <div class="modal-header">
           <span>{{ modal.isEdit ? "编辑分流出站组" : "添加分流出站组" }}</span>
           <svg
@@ -713,22 +713,16 @@
                             <template v-else>
                               <strong>{{ item.tag }}</strong>
                               <small
+                                v-if="item.isNode"
                                 style="
+                                  display: block;
+                                  margin-top: 0.12rem;
                                   color: var(--text-muted);
-                                  font-family: var(--font-mono);
-                                  margin-left: 0.15rem;
+                                  font-size: 0.7rem;
                                 "
-                                >({{ item.server }}:{{ item.port }})</small
                               >
-                              <span
-                                class="badge badge-info"
-                                style="
-                                  font-size: 0.65rem;
-                                  padding: 0.05rem 0.15rem;
-                                  margin-left: 0.25rem;
-                                "
-                                >{{ item.node_type }}</span
-                              >
+                                {{ getNodeProbeSummary(item) }}
+                              </small>
                             </template>
                           </span>
                           <span
@@ -858,6 +852,17 @@
                                 >{{ tag }} (系统)</span
                               >
                               <span v-else>{{ tag }}</span>
+                              <small
+                                v-if="getSelectedNode(tag)"
+                                style="
+                                  display: block;
+                                  margin-top: 0.12rem;
+                                  color: var(--text-muted);
+                                  font-size: 0.7rem;
+                                "
+                              >
+                                {{ getNodeProbeSummary(getSelectedNode(tag)) }}
+                              </small>
                             </span>
 
                             <button
@@ -1143,15 +1148,36 @@ const checkableOptions = computed(() => {
       tag: n.tag,
       isNode: true,
       subId: n.subscription_id ? n.subscription_id : "custom",
-      server: n.server,
-      port: n.port,
-      node_type: n.node_type,
-      title: `${n.tag} (${n.server}:${n.port}) [${n.node_type}]`,
+      title: n.tag,
+      geoCountry: n.geo_country,
+      tcpLatency: n.last_tcp_latency,
     });
   });
 
   return options;
 });
+
+const getNodeProbeSummary = (item) => {
+  const country = item.geoCountry || "国家未获取";
+  let tcp = "未测速";
+  if (item.tcpLatency === -1) {
+    tcp = "超时";
+  } else if (
+    item.tcpLatency !== null &&
+    item.tcpLatency !== undefined &&
+    item.tcpLatency !== ""
+  ) {
+    tcp = `${item.tcpLatency}ms`;
+  }
+  return `${country} · TCP ${tcp}`;
+};
+
+const getSelectedNode = (tag) => {
+  const node = allNodes.value.find((item) => item.tag === tag);
+  return node
+    ? { geoCountry: node.geo_country, tcpLatency: node.last_tcp_latency }
+    : null;
+};
 
 const filteredOutbounds = computed(() => {
   const includeKeywords = groupNodeSearch.value
@@ -1455,6 +1481,13 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.group-editor-modal {
+  width: 80vw;
+  max-width: none;
+  height: 80vh;
+  max-height: 80vh;
+}
+
 .group-editor-container {
   display: grid;
   grid-template-columns: 240px 1fr;
@@ -1462,6 +1495,12 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  .group-editor-modal {
+    width: calc(100vw - 2rem);
+    height: calc(100vh - 2rem);
+    max-height: calc(100vh - 2rem);
+  }
+
   .group-editor-container {
     grid-template-columns: 1fr;
     gap: 1rem;

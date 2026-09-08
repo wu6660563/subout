@@ -266,6 +266,19 @@
 
         <a
           class="menu-item"
+          :class="{ active: currentView === 'help' }"
+          href="#help"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M9.5 9a2.5 2.5 0 1 1 4.18 1.84c-.97.85-1.68 1.36-1.68 2.66" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span class="sidebar-text">使用说明</span>
+        </a>
+
+        <a
+          class="menu-item"
           :class="{ active: currentView === 'settings' }"
           href="#settings"
         >
@@ -383,6 +396,7 @@
 
     <!-- Main Content Area -->
     <main
+      class="app-main"
       style="
         flex: 1;
         display: flex;
@@ -474,6 +488,7 @@
       <GroupsView v-else-if="currentView === 'groups'" />
       <ConfigEditorView v-else-if="currentView === 'configs'" />
       <SiteTestView v-else-if="currentView === 'siteTest'" :token="token" />
+      <HelpView v-else-if="currentView === 'help'" @navigate="handleSwitchView" />
       <SettingsView v-else-if="currentView === 'settings'" />
     </main>
   </div>
@@ -572,6 +587,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import {
   token,
+  PUBLIC_ACCESS_TOKEN,
   toast,
   showToast,
   API_BASE,
@@ -602,6 +618,7 @@ import SiteTestView from "./components/SiteTestView.vue";
 import SimpleConfigView from "./components/SimpleConfigView.vue";
 import ServiceLogsView from "./components/ServiceLogsView.vue";
 import ModeSelectModal from "./components/ModeSelectModal.vue";
+import HelpView from "./components/HelpView.vue";
 
 import SettingsView from "./components/SettingsView.vue";
 import LoginBackground from "./components/LoginBackground.vue";
@@ -752,7 +769,25 @@ const vFocusSelect = {
   },
 };
 
-const currentView = ref("dashboard");
+const validViews = [
+  "dashboard",
+  "subscriptions",
+  "nodes",
+  "groups",
+  "configs",
+  "simpleConfig",
+  "serviceLogs",
+  "siteTest",
+  "help",
+  "settings",
+];
+
+// Resolve the hash synchronously so a direct refresh of /#nodes (or any other
+// view) does not briefly render the dashboard while auth/status requests load.
+const initialHashView = window.location.hash.substring(1).split("/")[0];
+const currentView = ref(
+  validViews.includes(initialHashView) ? initialHashView : "dashboard",
+);
 const activeTheme = ref("system");
 const loginPassword = ref("");
 const loggingIn = ref(false);
@@ -890,18 +925,6 @@ const handleRouting = () => {
     window.history.replaceState(null, null, newHash);
   }
 
-  const validViews = [
-    "dashboard",
-    "subscriptions",
-    "nodes",
-    "groups",
-    "configs",
-    "simpleConfig",
-    "serviceLogs",
-    "siteTest",
-    "settings",
-  ];
-
   if (!viewName || !validViews.includes(viewName)) {
     viewName = "dashboard";
     window.history.replaceState(null, null, `#${viewName}`);
@@ -910,13 +933,18 @@ const handleRouting = () => {
 };
 
 const verifyToken = async () => {
-  if (!token.value) return;
   try {
     const res = await fetch(`${API_BASE}/api/auth/status`, {
-      headers: { Authorization: `Bearer ${token.value}` },
+      headers: token.value
+        ? { Authorization: `Bearer ${token.value}` }
+        : undefined,
       signal: AbortSignal.timeout(6000),
     });
     if (res.ok) {
+      if (!token.value) {
+        token.value = PUBLIC_ACCESS_TOKEN;
+        localStorage.setItem("admin_token", PUBLIC_ACCESS_TOKEN);
+      }
       await initAjv();
       await fetchSystemMode();
       await fetchKernelInfo();
@@ -950,9 +978,7 @@ onMounted(() => {
   updateThemeState();
   mediaQuery.addEventListener("change", handleSystemThemeChange);
 
-  if (token.value) {
-    verifyToken();
-  }
+  verifyToken();
 
   window.addEventListener("hashchange", handleRouting);
 

@@ -76,7 +76,7 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
             // Load existing node tags from DB to prevent global duplicates
             let mut existing_nodes = Vec::new();
             {
-                let mut stmt = tx.prepare("SELECT id, subscription_id, tag, node_type, server, port, raw_json, enabled, is_custom, last_tcp_latency, last_web_latency, last_tested_at, last_target_url FROM nodes")?;
+                let mut stmt = tx.prepare("SELECT id, subscription_id, tag, node_type, server, port, raw_json, enabled, is_custom, last_tcp_latency, last_web_latency, last_tested_at, last_target_url, geo_country, geo_city, geo_ip, geo_tested_at FROM nodes")?;
                 let rows = stmt.query_map([], |row| {
                     let enabled_int: i32 = row.get(7)?;
                     let is_custom_int: i32 = row.get(8)?;
@@ -95,6 +95,10 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
                         last_web_latency: row.get(10)?,
                         last_tested_at: row.get(11)?,
                         last_target_url: row.get(12)?,
+                        geo_country: row.get(13)?,
+                        geo_city: row.get(14)?,
+                        geo_ip: row.get(15)?,
+                        geo_tested_at: row.get(16)?,
                     })
                 })?;
                 for r in rows {

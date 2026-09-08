@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 
@@ -186,6 +187,11 @@ pub struct ServiceStatusInfo {
 
 pub struct SingBoxServiceManager {
     child: Arc<RwLock<Option<tokio::process::Child>>>,
+    // The Child handle is only valid for the current Subout process. Keep the
+    // PID separately so a transient handle error does not turn a live core
+    // into a false "stopped" state. On a Subout restart, Windows can recover
+    // this PID by matching the exact generated config path.
+    managed_pid: Arc<RwLock<Option<u32>>>,
     started_at: Arc<RwLock<Option<u64>>>,
     ready: Arc<RwLock<bool>>,
     last_error: Arc<RwLock<Option<String>>>,
@@ -195,6 +201,14 @@ pub struct SingBoxServiceManager {
     current_log_level: Arc<RwLock<String>>,
     current_log_disabled: Arc<RwLock<bool>>,
     current_log_output: Arc<RwLock<Option<String>>>,
+    conflict_cache: Arc<RwLock<Option<ConflictCache>>>,
+}
+
+#[derive(Clone)]
+struct ConflictCache {
+    managed_pid: Option<u32>,
+    refreshed_at: Instant,
+    processes: Vec<ConflictingProcessInfo>,
 }
 
 impl Default for SingBoxServiceManager {
@@ -207,6 +221,7 @@ impl SingBoxServiceManager {
     pub fn new() -> Self {
         Self {
             child: Arc::new(RwLock::new(None)),
+            managed_pid: Arc::new(RwLock::new(None)),
             started_at: Arc::new(RwLock::new(None)),
             ready: Arc::new(RwLock::new(false)),
             last_error: Arc::new(RwLock::new(None)),
@@ -216,6 +231,7 @@ impl SingBoxServiceManager {
             current_log_level: Arc::new(RwLock::new("info".to_string())),
             current_log_disabled: Arc::new(RwLock::new(false)),
             current_log_output: Arc::new(RwLock::new(None)),
+            conflict_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -312,33 +328,102 @@ impl SingBoxServiceManager {
     }
 
     pub async fn is_running(&self) -> bool {
-        let mut child_guard = self.child.write().await;
-        if let Some(ref mut child) = *child_guard {
-            match child.try_wait() {
-                Ok(None) => true,
-                _ => {
-                    *child_guard = None;
-                    false
-                }
-            }
-        } else {
-            false
-        }
+        self.get_managed_pid().await.is_some()
     }
 
     pub async fn get_managed_pid(&self) -> Option<u32> {
-        let mut child_guard = self.child.write().await;
-        if let Some(ref mut child) = *child_guard {
-            match child.try_wait() {
-                Ok(None) => child.id(),
-                _ => {
-                    *child_guard = None;
-                    None
+        let child_state = {
+            let mut child_guard = self.child.write().await;
+            if let Some(ref mut child) = *child_guard {
+                match child.try_wait() {
+                    Ok(None) => Some(child.id()),
+                    // The operating system has confirmed that the process
+                    // exited. Discard both handles; a PID alone must never
+                    // keep a stopped service marked as running.
+                    Ok(Some(_)) => {
+                        *child_guard = None;
+                        Some(None)
+                    }
+                    // Tokio can occasionally fail to query a child handle
+                    // while the underlying Windows process is still alive.
+                    // Verify the PID natively before treating that as a stop.
+                    Err(_) => match child.id() {
+                        Some(pid) if crate::platform::current_platform().is_pid_alive(pid) => {
+                            Some(Some(pid))
+                        }
+                        _ => {
+                            *child_guard = None;
+                            Some(None)
+                        }
+                    },
                 }
+            } else {
+                None
             }
-        } else {
-            None
+        };
+
+        match child_state {
+            Some(Some(pid)) => {
+                *self.managed_pid.write().await = Some(pid);
+                return Some(pid);
+            }
+            Some(None) => {
+                *self.managed_pid.write().await = None;
+                return None;
+            }
+            None => {}
         }
+
+        // If Subout owns a remembered PID, use the inexpensive native liveness
+        // check. This is the normal path after the process handle is no longer
+        // available (for example following a log-pipe failure).
+        if let Some(pid) = *self.managed_pid.read().await {
+            if crate::platform::current_platform().is_pid_alive(pid) {
+                return Some(pid);
+            }
+            *self.managed_pid.write().await = None;
+        }
+        None
+    }
+
+    /// Process conflict discovery on Windows uses a CIM query and can take
+    /// seconds on a busy machine. It is useful diagnostic data, but must not
+    /// delay the authoritative service state endpoint. Return the latest
+    /// matching snapshot and refresh it in the background at most once every
+    /// three seconds.
+    async fn get_cached_conflicting_processes(
+        &self,
+        managed_pid: Option<u32>,
+    ) -> Vec<ConflictingProcessInfo> {
+        const CONFLICT_CACHE_TTL: Duration = Duration::from_secs(3);
+
+        let cached = self.conflict_cache.read().await.clone();
+        let is_fresh = cached.as_ref().is_some_and(|entry| {
+            entry.managed_pid == managed_pid && entry.refreshed_at.elapsed() < CONFLICT_CACHE_TTL
+        });
+
+        if !is_fresh {
+            let cache = self.conflict_cache.clone();
+            let config_path = Self::get_running_config_path();
+            tokio::spawn(async move {
+                let processes = tokio::task::spawn_blocking(move || {
+                    crate::platform::current_platform()
+                        .detect_conflicting_processes(managed_pid, &config_path)
+                })
+                .await
+                .unwrap_or_default();
+                *cache.write().await = Some(ConflictCache {
+                    managed_pid,
+                    refreshed_at: Instant::now(),
+                    processes,
+                });
+            });
+        }
+
+        cached
+            .filter(|entry| entry.managed_pid == managed_pid)
+            .map(|entry| entry.processes)
+            .unwrap_or_default()
     }
 
     pub async fn find_external_singbox_processes(&self) -> Vec<ConflictingProcessInfo> {
@@ -347,36 +432,12 @@ impl SingBoxServiceManager {
     }
 
     pub async fn get_status(&self) -> ServiceStatusInfo {
-        let (is_run, pid) = {
-            let mut child_guard = self.child.write().await;
-            if let Some(ref mut child) = *child_guard {
-                match child.try_wait() {
-                    Ok(None) => (true, child.id()),
-                    Ok(Some(status)) => {
-                        *child_guard = None;
-                        *self.ready.write().await = false;
-                        *self.started_at.write().await = None;
-                        if self.last_error.read().await.is_none() && !status.success() {
-                            *self.last_error.write().await =
-                                Some(format!("sing-box 核心进程已退出 ({})", status));
-                        }
-                        (false, None)
-                    }
-                    Err(e) => {
-                        *child_guard = None;
-                        *self.ready.write().await = false;
-                        *self.started_at.write().await = None;
-                        if self.last_error.read().await.is_none() {
-                            *self.last_error.write().await =
-                                Some(format!("检测 sing-box 进程状态异常: {}", e));
-                        }
-                        (false, None)
-                    }
-                }
-            } else {
-                (false, None)
-            }
-        };
+        let pid = self.get_managed_pid().await;
+        let is_run = pid.is_some();
+        if !is_run {
+            *self.ready.write().await = false;
+            *self.started_at.write().await = None;
+        }
 
         let started_at = if is_run {
             *self.started_at.read().await
@@ -427,7 +488,7 @@ impl SingBoxServiceManager {
             .as_deref()
             .and_then(|s| serde_json::from_str::<Value>(s).ok());
         let is_tun = is_run && config_json.as_ref().map(is_tun_mode).unwrap_or(false);
-        let conflicting_processes = detect_conflicting_singbox_processes(pid);
+        let conflicting_processes = self.get_cached_conflicting_processes(pid).await;
 
         let (log_level, log_disabled, log_output) = if is_run {
             (
@@ -609,10 +670,8 @@ impl SingBoxServiceManager {
             *self.cached_sudo_pass.write().await = Some(p.clone());
         }
 
-        // 1. Stop any existing Subout-managed processes and lingering instances first
-        self.stop().await?;
-
-        // 2. Handle conflicting external sing-box processes
+        // 1. Detect or take over conflicting external sing-box processes before we replace
+        // the running configuration. The currently managed child is excluded from this list.
         if takeover {
             self.takeover_external_processes(sudo_pass).await?;
         } else {
@@ -691,6 +750,27 @@ impl SingBoxServiceManager {
             );
         }
 
+        let tun_mode = is_tun_mode(&final_config_json);
+        let as_root = is_running_as_root();
+        let platform = crate::platform::current_platform();
+
+        if windows_tun_requires_elevation(platform.is_windows(), tun_mode, as_root) {
+            let err_msg = "Windows TUN 模式需要以管理员身份运行 Subout。请关闭当前程序，右键选择“以管理员身份运行”后重试；非 TUN 配置可在不提权的情况下启动。".to_string();
+            self.append_log(&format!("❌ {}", err_msg)).await;
+            *self.last_error.write().await = Some(err_msg.clone());
+            return Err(anyhow!(err_msg));
+        }
+
+        if let Err(err_msg) = validate_runtime_config(&singbox_bin, &final_config_json) {
+            self.append_log(&format!("❌ {}", err_msg)).await;
+            *self.last_error.write().await = Some(err_msg.clone());
+            return Err(anyhow!(err_msg));
+        }
+
+        // 2. The new configuration is valid, so it is now safe to stop the existing
+        // managed process and replace its runtime configuration.
+        self.stop().await?;
+
         let config_path = Self::get_running_config_path();
         if let Some(parent) = config_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -700,9 +780,6 @@ impl SingBoxServiceManager {
         // 3. Write config file
         std::fs::write(&config_path, &config_str)
             .map_err(|e| anyhow!("写入 sing-box 运行配置文件失败: {}", e))?;
-
-        let tun_mode = is_tun_mode(&final_config_json);
-        let as_root = is_running_as_root();
 
         let explicit_pass = sudo_pass.and_then(|p| {
             let trimmed = p.trim();
@@ -720,8 +797,6 @@ impl SingBoxServiceManager {
         let cached_pass = self.cached_sudo_pass.read().await.clone();
         let effective_sudo_pass = explicit_pass.or(cached_pass);
         let has_sudo_pass = effective_sudo_pass.is_some();
-        let platform = crate::platform::current_platform();
-
         let use_sudo = !platform.is_windows() && !as_root && has_sudo_pass;
 
         if use_sudo {
@@ -1013,6 +1088,10 @@ impl SingBoxServiceManager {
         }
 
         *self.child.write().await = Some(child);
+        // Record the PID independently of the Child handle. This lets status
+        // polling continue to report the real Windows process even if Tokio's
+        // handle is later unavailable.
+        *self.managed_pid.write().await = pid;
 
         // Wait up to 3000ms for sing-box to initialize and report ready or exit
         let mut started_ready = false;
@@ -1027,7 +1106,21 @@ impl SingBoxServiceManager {
             }
         }
 
-        if self.is_running().await {
+        let is_running_after_startup = self.is_running().await;
+        let startup_error = self.last_error.read().await.clone();
+        if startup_error_requires_cleanup(is_running_after_startup, startup_error.as_deref()) {
+            let err = startup_error.expect("startup error is present when cleanup is required");
+            self.append_log(&format!(
+                "❌ sing-box 启动期间报告致命错误，正在清理进程: {}",
+                err
+            ))
+            .await;
+            self.stop().await?;
+            *self.last_error.write().await = Some(err.clone());
+            return Err(anyhow!("sing-box 启动异常: {}", err));
+        }
+
+        if is_running_after_startup {
             *self.ready.write().await = true;
             started_ready = true;
         }
@@ -1122,14 +1215,18 @@ impl SingBoxServiceManager {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        let mut child_guard = self.child.write().await;
+        // Take the handle before awaiting process operations. Holding the
+        // child lock while taskkill/PowerShell runs used to make concurrent
+        // status requests queue behind stop/restart and occasionally render a
+        // stale state after a page refresh.
+        let child_opt = self.child.write().await.take();
         let mut had_child = false;
-        let mut pid_opt = None;
+        let mut pid_opt = *self.managed_pid.read().await;
         let platform = crate::platform::current_platform();
 
-        if let Some(mut child) = child_guard.take() {
+        if let Some(mut child) = child_opt {
             had_child = true;
-            pid_opt = child.id();
+            pid_opt = child.id().or(pid_opt);
             self.append_log("正在停止 sing-box 服务...").await;
 
             let _ = child.start_kill();
@@ -1162,16 +1259,42 @@ impl SingBoxServiceManager {
             )
             .await;
 
+        // Do not claim a successful stop until Windows/Linux confirms the
+        // actual managed PID is gone. In particular, an unelevated panel can
+        // fail to kill an elevated TUN core; reporting "stopped" in that case
+        // would leave the dashboard and the real proxy process inconsistent.
+        if let Some(pid) = pid_opt {
+            for _ in 0..10 {
+                if !platform.is_pid_alive(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if platform.is_pid_alive(pid) {
+                *self.managed_pid.write().await = Some(pid);
+                *self.ready.write().await = true;
+                let message = format!(
+                    "sing-box 进程 (PID: {}) 仍在运行，停止操作未完成；请以管理员身份运行 Subout 后重试。",
+                    pid
+                );
+                *self.last_error.write().await = Some(message.clone());
+                self.append_log(&format!("❌ {}", message)).await;
+                return Err(anyhow!(message));
+            }
+        }
+
         platform.disable_system_proxy(cached_pass.as_deref());
         platform.disable_tun_dns(cached_pass.as_deref());
         if platform.is_macos() || platform.is_windows() {
             self.append_log("🌐 已恢复系统原始网络代理设置").await;
         }
 
-        if had_child {
+        if had_child || pid_opt.is_some() {
             self.append_log("⏹️ sing-box 服务已停止").await;
         }
 
+        *self.managed_pid.write().await = None;
+        *self.conflict_cache.write().await = None;
         *self.started_at.write().await = None;
         *self.ready.write().await = false;
         *self.last_error.write().await = None;
@@ -1276,6 +1399,50 @@ pub fn is_tun_mode(config_json: &Value) -> bool {
         }
     }
     false
+}
+
+fn windows_tun_requires_elevation(is_windows: bool, tun_mode: bool, is_elevated: bool) -> bool {
+    is_windows && tun_mode && !is_elevated
+}
+
+fn startup_error_requires_cleanup(is_running: bool, startup_error: Option<&str>) -> bool {
+    is_running && startup_error.is_some()
+}
+
+fn validate_runtime_config(singbox_bin: &Path, config: &Value) -> Result<(), String> {
+    let temp_file_path =
+        crate::paths::AppPaths::get().temp_file_path("singbox_start_check", ".json");
+    let config_str = serde_json::to_string_pretty(config)
+        .map_err(|err| format!("启动前配置序列化失败: {}", err))?;
+
+    std::fs::write(&temp_file_path, config_str)
+        .map_err(|err| format!("启动前写入配置校验文件失败: {}", err))?;
+
+    let output = std::process::Command::new(singbox_bin)
+        .args(["check", "-c", &temp_file_path.to_string_lossy()])
+        .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
+        .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
+        .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")
+        .output();
+    let _ = std::fs::remove_file(&temp_file_path);
+
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if stderr.is_empty() { stdout } else { stderr };
+            Err(format!(
+                "sing-box 启动前配置校验失败{}",
+                if details.is_empty() {
+                    format!("（退出码：{}）", output.status)
+                } else {
+                    format!("：{}", details)
+                }
+            ))
+        }
+        Err(err) => Err(format!("执行 sing-box 启动前配置校验失败: {}", err)),
+    }
 }
 
 pub async fn kill_all_subout_singbox_processes(
@@ -1583,6 +1750,27 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_tun_requires_elevation_only_for_unelevated_tun_startup() {
+        assert!(windows_tun_requires_elevation(true, true, false));
+        assert!(!windows_tun_requires_elevation(true, true, true));
+        assert!(!windows_tun_requires_elevation(true, false, false));
+        assert!(!windows_tun_requires_elevation(false, true, false));
+    }
+
+    #[test]
+    fn test_running_process_with_startup_error_is_not_reported_as_ready() {
+        assert!(startup_error_requires_cleanup(
+            true,
+            Some("Access is denied")
+        ));
+        assert!(!startup_error_requires_cleanup(true, None));
+        assert!(!startup_error_requires_cleanup(
+            false,
+            Some("Access is denied")
+        ));
+    }
+
+    #[test]
     fn test_detect_conflicting_singbox_processes_excludes_self_and_managed() {
         let current_pid = std::process::id();
         let conflicts = detect_conflicting_singbox_processes(Some(current_pid));
@@ -1743,6 +1931,19 @@ mod tests {
         let status = mgr.get_status().await;
         assert!(!status.running);
         assert!(!status.ready);
+    }
+
+    #[tokio::test]
+    async fn test_new_manager_never_adopts_an_existing_process() {
+        // A new panel instance has no Child handle and must not infer ownership
+        // from a globally running sing-box process. On Windows an elevated
+        // process can hide its command line, so automatic adoption would make
+        // stale/orphan cores appear as this instance's healthy service.
+        let manager = SingBoxServiceManager::new();
+        assert!(!manager.is_running().await);
+        let status = manager.get_status().await;
+        assert!(!status.running);
+        assert!(status.pid.is_none());
     }
 
     #[tokio::test]
