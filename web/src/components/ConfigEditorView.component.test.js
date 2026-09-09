@@ -1398,3 +1398,26 @@ describe("ConfigEditorView - groupImportModal 交互", () => {
     });
   });
 });
+
+describe("ConfigEditorView - TUN 入站地址编辑", () => {
+  it("编辑 TUN 入站时应严格显示实际地址，不自动补 IPv6", async () => {
+    const wrapper = await mountConfigEditor();
+
+    wrapper.vm.editItem(
+      {
+        type: "tun",
+        tag: "tun-in",
+        address: ["172.19.0.1/30"],
+      },
+      "inbound",
+      vi.fn(),
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("TUN 地址 (address)");
+    expect(wrapper.findAll('input[placeholder="172.19.0.1/30"]').length).toBe(
+      1,
+    );
+    expect(wrapper.findAll('input[placeholder="fd00::1/126"]').length).toBe(0);
+  });
+});

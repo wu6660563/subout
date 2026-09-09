@@ -2425,6 +2425,53 @@
                   padding-top: 1rem;
                 "
               >
+                <div class="input-group" style="margin-bottom: 1rem">
+                  <div
+                    style="
+                      display: flex;
+                      align-items: center;
+                      justify-content: space-between;
+                      gap: 1rem;
+                      margin-bottom: 0.5rem;
+                    "
+                  >
+                    <label style="margin-bottom: 0">TUN 地址 (address)</label>
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-small"
+                      @click="itemModal.itemData.address.push('')"
+                    >
+                      + 添加地址
+                    </button>
+                  </div>
+                  <div
+                    v-for="(address, addressIdx) in itemModal.itemData.address"
+                    :key="`tun-address-${addressIdx}`"
+                    style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem"
+                  >
+                    <input
+                      v-model="itemModal.itemData.address[addressIdx]"
+                      type="text"
+                      class="input-control"
+                      :placeholder="
+                        addressIdx === 0 ? '172.19.0.1/30' : 'fd00::1/126'
+                      "
+                      required
+                    />
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-small"
+                      title="删除地址"
+                      @click="itemModal.itemData.address.splice(addressIdx, 1)"
+                    >
+                      删除
+                    </button>
+                  </div>
+                  <small style="color: var(--text-muted)">
+                    可同时配置 IPv4 和 IPv6 CIDR 地址，例如
+                    172.19.0.1/30、fd00::1/126。
+                  </small>
+                </div>
                 <div class="grid-2">
                   <div class="input-group">
                     <label>网卡接口名称 (interface_name)</label>
@@ -5847,20 +5894,20 @@ const loadNodePoolCache = async () => {
   if (nodePoolCache.value.length > 0) return nodePoolCache.value;
   if (nodePoolCachePromise) return nodePoolCachePromise;
   nodePoolCachePromise = (async () => {
-  try {
-    const res = await fetch(`${API_BASE}/api/nodes?limit=100000`, {
-      headers: { Authorization: `Bearer ${token.value}` },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      nodePoolCache.value = data.nodes || [];
+    try {
+      const res = await fetch(`${API_BASE}/api/nodes?limit=100000`, {
+        headers: { Authorization: `Bearer ${token.value}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        nodePoolCache.value = data.nodes || [];
+      }
+    } catch (e) {
+      console.error("加载节点池缓存失败", e);
+    } finally {
+      nodePoolCachePromise = null;
     }
-  } catch (e) {
-    console.error("加载节点池缓存失败", e);
-  } finally {
-    nodePoolCachePromise = null;
-  }
-  return nodePoolCache.value;
+    return nodePoolCache.value;
   })();
   return nodePoolCachePromise;
 };
@@ -8084,6 +8131,16 @@ const onModalDnsServerTypeChange = () => {
 
 const onInboundTypeChange = (inb) => {
   if (inb.type === "tun") {
+    const addresses = Array.isArray(inb.address)
+      ? inb.address.filter((address) => String(address).trim())
+      : [];
+    if (!addresses.some((address) => address.includes("."))) {
+      addresses.unshift("172.19.0.1/30");
+    }
+    if (!addresses.some((address) => address.includes(":"))) {
+      addresses.push("fd00::1/126");
+    }
+    inb.address = addresses;
     if (isApplePlatform.value || isWindowsPlatform.value) {
       inb.interface_name = "";
     } else {
