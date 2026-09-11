@@ -1003,6 +1003,30 @@ describe("ConfigEditorView - groupImportModal 交互", () => {
   });
 
   describe("配置列表与同步最新资源", () => {
+    it("配置列表显示排序值并在修改后保存", async () => {
+      const baseFetch = createMockFetch();
+      let orderRequest = null;
+      const wrapper = await mountConfigEditor((url, options) => {
+        if (String(url).includes("/api/config/history/1/order")) {
+          orderRequest = { url: String(url), options };
+          return Promise.resolve({ ok: true, status: 200, text: async () => "" });
+        }
+        return baseFetch(url, options);
+      });
+      const orderInput = wrapper.find("input[aria-label='配置排序值']");
+
+      expect(orderInput.exists()).toBe(true);
+      expect(orderInput.classes()).toContain("config-sort-input");
+      expect(orderInput.element.parentElement.classList.contains("config-sort-control")).toBe(true);
+      await orderInput.setValue("0");
+      await orderInput.trigger("change");
+      await flushPromises();
+
+      expect(orderRequest).not.toBeNull();
+      expect(orderRequest.options.method).toBe("PATCH");
+      expect(JSON.parse(orderRequest.options.body)).toEqual({ sort_order: 0 });
+    });
+
     it("配置列表展示'最后更新时间'与'同步最新资源'按钮", async () => {
       window.location.hash = "#configs";
       const wrapper = await mountConfigEditor();
@@ -1172,6 +1196,63 @@ describe("ConfigEditorView - groupImportModal 交互", () => {
       expect(mockShowToast).toHaveBeenCalledWith(
         expect.stringContaining("已批量删除选中的"),
       );
+    });
+
+    it("删除策略组时移除仅由它引用的代理节点，但保留其他策略组共享的节点", async () => {
+      window.location.hash = "#configs/edit/1/outbounds";
+      const baseFetch = createMockFetch();
+      vi.spyOn(global, "fetch").mockImplementation((url, options) => {
+        if (String(url).includes("/api/config/history/1")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              id: 1,
+              detail: "测试配置1",
+              content: JSON.stringify({
+                outbounds: [
+                  {
+                    tag: "group-a",
+                    type: "selector",
+                    outbounds: ["node-exclusive", "node-shared"],
+                  },
+                  {
+                    tag: "group-b",
+                    type: "urltest",
+                    outbounds: ["node-shared"],
+                  },
+                  { tag: "node-exclusive", type: "vmess" },
+                  { tag: "node-shared", type: "trojan" },
+                ],
+              }),
+            }),
+            text: async () => "{}",
+          });
+        }
+        return baseFetch(url, options);
+      });
+
+      const wrapper = mount(ConfigEditorView, {
+        global: { stubs: { JsonTreeView: true } },
+      });
+      await flushPromises();
+      await flushPromises();
+
+      const groupA = wrapper
+        .findAll(".outbound-card.is-group")
+        .find((card) => card.text().includes("group-a"));
+      await groupA.find("input[type='checkbox']").setValue(true);
+      const batchBtn = wrapper
+        .findAll("button")
+        .find((b) => b.text().includes("批量删除"));
+      await batchBtn.trigger("click");
+      await flushPromises();
+
+      const tags = wrapper.vm.configData.outbounds.map((outbound) => outbound.tag);
+      expect(tags).not.toContain("group-a");
+      expect(tags).not.toContain("node-exclusive");
+      expect(tags).toContain("group-b");
+      expect(tags).toContain("node-shared");
     });
 
     it("空出站组显示'缺少节点'警告标识", async () => {

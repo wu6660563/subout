@@ -648,23 +648,45 @@ const formatBytes = (bytes) => {
 };
 
 const formatTrafficUsage = (sub) => {
-  if (sub.upload == null && sub.download == null && sub.total == null) {
+  if (
+    sub.upload == null &&
+    sub.download == null &&
+    sub.total == null &&
+    sub.remaining == null
+  ) {
     return null;
   }
-  const upload = sub.upload || 0;
-  const download = sub.download || 0;
+  const hasUsed = sub.upload != null || sub.download != null;
+  const upload = Number(sub.upload || 0);
+  const download = Number(sub.download || 0);
   const used = upload + download;
-  const total = sub.total;
+  const total = Number(sub.total || 0);
+  const remaining =
+    sub.remaining != null ? Math.max(0, Number(sub.remaining)) : null;
 
   const usedStr = formatBytes(used);
-  if (total && total > 0) {
+  const remainingStr = remaining != null ? formatBytes(remaining) : null;
+  if (total > 0 && hasUsed) {
     const totalStr = formatBytes(total);
     const percent = Math.min(100, Math.round((used / total) * 100));
     return {
       usedStr,
       totalStr,
       percent,
-      text: `${usedStr} / ${totalStr}`,
+      text: `${usedStr} / ${totalStr}${remainingStr ? ` · 剩余 ${remainingStr}` : ""}`,
+    };
+  }
+  if (remainingStr) {
+    return {
+      usedStr: hasUsed ? usedStr : null,
+      totalStr: total > 0 ? formatBytes(total) : null,
+      percent:
+        total > 0 ? Math.min(100, Math.round(((total - remaining) / total) * 100)) : null,
+      text: hasUsed
+        ? `已用 ${usedStr} · 剩余 ${remainingStr}`
+        : total > 0
+          ? `剩余 ${remainingStr} / ${formatBytes(total)}`
+          : `剩余 ${remainingStr}`,
     };
   }
   return {

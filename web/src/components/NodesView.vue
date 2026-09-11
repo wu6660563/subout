@@ -1718,24 +1718,29 @@ const getSubLabel = (subId) => {
   return sub ? sub.label : `订阅 #${subId}`;
 };
 
+const buildNodeListParams = (page, limit) => {
+  const params = new URLSearchParams({
+    page,
+    limit,
+    search: nodeSearchInput.value,
+  });
+  if (nodeSubFilter.value === "custom") {
+    params.append("subscription_id", "-1");
+  } else if (nodeSubFilter.value !== "all") {
+    params.append("subscription_id", nodeSubFilter.value);
+  }
+  if (tcpFilter.value !== "all") {
+    params.append("tcp_filter", tcpFilter.value);
+  }
+  if (webFilter.value !== "all") {
+    params.append("web_filter", webFilter.value);
+  }
+  return params;
+};
+
 const loadNodes = async () => {
   try {
-    const params = new URLSearchParams({
-      page: nodePage.value,
-      limit: nodeLimit.value,
-      search: nodeSearchInput.value,
-    });
-    if (nodeSubFilter.value === "custom") {
-      params.append("subscription_id", "-1");
-    } else if (nodeSubFilter.value !== "all") {
-      params.append("subscription_id", nodeSubFilter.value);
-    }
-    if (tcpFilter.value !== "all") {
-      params.append("tcp_filter", tcpFilter.value);
-    }
-    if (webFilter.value !== "all") {
-      params.append("web_filter", webFilter.value);
-    }
+    const params = buildNodeListParams(nodePage.value, nodeLimit.value);
     const url = `${API_BASE}/api/nodes?${params.toString()}`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${token.value}` },
@@ -2477,7 +2482,8 @@ watch(
 
 const loadAllNodesForSelect = async () => {
   try {
-    const res = await fetch(`${API_BASE}/api/nodes?page=1&limit=999999`, {
+    const params = buildNodeListParams(1, 999999);
+    const res = await fetch(`${API_BASE}/api/nodes?${params.toString()}`, {
       headers: { Authorization: `Bearer ${token.value}` },
     });
     if (res.ok) {

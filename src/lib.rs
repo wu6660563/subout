@@ -10,7 +10,9 @@ pub mod service;
 pub mod simple_config;
 pub mod web;
 
+use chrono::NaiveDate;
 use parser::Outbound;
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use url::Url;
@@ -20,6 +22,7 @@ pub struct SubscriptionUserInfo {
     pub upload: Option<i64>,
     pub download: Option<i64>,
     pub total: Option<i64>,
+    pub remaining: Option<i64>,
     pub expire: Option<i64>,
 }
 
@@ -33,6 +36,9 @@ impl SubscriptionUserInfo {
         }
         if self.total.is_none() {
             self.total = other.total;
+        }
+        if self.remaining.is_none() {
+            self.remaining = other.remaining;
         }
         if self.expire.is_none() {
             self.expire = other.expire;
@@ -52,6 +58,7 @@ pub fn parse_userinfo_str(s: &str) -> SubscriptionUserInfo {
                 "upload" => info.upload = val,
                 "download" => info.download = val,
                 "total" => info.total = val,
+                "remaining" | "remain" => info.remaining = val,
                 "expire" => info.expire = val,
                 _ => {}
             }
@@ -60,51 +67,100 @@ pub fn parse_userinfo_str(s: &str) -> SubscriptionUserInfo {
     info
 }
 
-pub fn parse_userinfo_from_body(body: &str) -> SubscriptionUserInfo {
-    for line in body.lines().take(30) {
-        let line_trimmed = line.trim();
-        let line_lower = line_trimmed.to_lowercase();
-        if line_lower.contains("subscription-userinfo")
-            || line_lower.contains("upload=")
-            || line_lower.contains("expire=")
-        {
-            if let Some(pos) = line_lower.find("subscription-userinfo:") {
-                let info_part = &line_trimmed[pos + "subscription-userinfo:".len()..];
-                let info = parse_userinfo_str(info_part);
-                if info.upload.is_some()
-                    || info.download.is_some()
-                    || info.total.is_some()
-                    || info.expire.is_some()
-                {
-                    return info;
+fn parse_size_value(input: &str) -> Option<i64> {
+    let start = input
+        .char_indices()
+        .find(|(_, ch)| ch.is_ascii_digit())
+        .map(|(idx, _)| idx)?;
+    let end = input[start..]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_digit() && *ch != '.')
+        .map(|(idx, _)| start + idx)
+        .unwrap_or(input.len());
+    let value = input[start..end].parse::<f64>().ok()?;
+    let unit = input[end..]
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_lowercase();
+    let multiplier = match unit.as_str() {
+        "pb" | "pib" | "p" => 1024_f64.powi(5),
+        "tb" | "tib" | "t" => 1024_f64.powi(4),
+        "gb" | "gib" | "g" => 1024_f64.powi(3),
+        "mb" | "mib" | "m" => 1024_f64.powi(2),
+        "kb" | "kib" | "k" => 1024_f64,
+        _ => 1_f64,
+    };
+    Some((value * multiplier).round() as i64)
+}
+
+fn parse_labeled_size(text: &str, labels: &[&str]) -> Option<i64> {
+    let lower = text.to_lowercase();
+    labels.iter().find_map(|label| {
+        lower
+            .find(&label.to_lowercase())
+            .and_then(|pos| parse_size_value(&text[pos + label.len()..]))
+    })
+}
+
+fn parse_labeled_date(text: &str, labels: &[&str]) -> Option<i64> {
+    let lower = text.to_lowercase();
+    labels.iter().find_map(|label| {
+        let pos = lower.find(&label.to_lowercase())?;
+        text[pos + label.len()..]
+            .split(|ch: char| !ch.is_ascii_digit() && ch != '-')
+            .find_map(|part| {
+                if part.len() != 10 {
+                    return None;
                 }
-            } else if let Some(pos) = line_lower.find("subscription-userinfo=") {
-                let info_part = &line_trimmed[pos + "subscription-userinfo=".len()..];
-                let info = parse_userinfo_str(info_part);
-                if info.upload.is_some()
-                    || info.download.is_some()
-                    || info.total.is_some()
-                    || info.expire.is_some()
-                {
-                    return info;
-                }
-            } else if line_lower.contains("upload=") || line_lower.contains("expire=") {
-                let clean_line = line_trimmed
-                    .trim_start_matches('#')
-                    .trim_start_matches("//")
-                    .trim();
-                let info = parse_userinfo_str(clean_line);
-                if info.upload.is_some()
-                    || info.download.is_some()
-                    || info.total.is_some()
-                    || info.expire.is_some()
-                {
-                    return info;
-                }
-            }
-        }
+                NaiveDate::parse_from_str(part, "%Y-%m-%d")
+                    .ok()?
+                    .and_hms_opt(23, 59, 59)
+                    .map(|dt| dt.and_utc().timestamp())
+            })
+    })
+}
+
+fn parse_userinfo_text(text: &str) -> SubscriptionUserInfo {
+    let lower = text.to_lowercase();
+    let mut info = if let Some(pos) = lower.find("subscription-userinfo:") {
+        parse_userinfo_str(&text[pos + "subscription-userinfo:".len()..])
+    } else if let Some(pos) = lower.find("subscription-userinfo=") {
+        parse_userinfo_str(&text[pos + "subscription-userinfo=".len()..])
+    } else {
+        parse_userinfo_str(text.trim_start_matches('#').trim_start_matches("//").trim())
+    };
+
+    if info.remaining.is_none() {
+        info.remaining = parse_labeled_size(
+            text,
+            &[
+                "剩余流量",
+                "remaining traffic",
+                "traffic remaining",
+                "remaining",
+            ],
+        );
     }
-    SubscriptionUserInfo::default()
+    if info.expire.is_none() {
+        info.expire = parse_labeled_date(text, &["套餐到期", "到期时间", "expire date", "expires"]);
+    }
+    info
+}
+
+pub fn parse_userinfo_from_body(body: &str) -> SubscriptionUserInfo {
+    let decoded_body = parser::decode_base64(body.to_string()).unwrap_or_else(|| body.to_string());
+    let mut result = SubscriptionUserInfo::default();
+    for line in decoded_body.lines() {
+        let mut info = parse_userinfo_text(line);
+        if let Some(fragment) = line.split_once('#').map(|(_, fragment)| fragment) {
+            let decoded_fragment = percent_decode_str(fragment).decode_utf8_lossy();
+            info = info.merge(parse_userinfo_text(&decoded_fragment));
+        }
+        result = result.merge(info);
+    }
+    result
 }
 
 /// Fetches raw subscription content from the given URL.
@@ -339,6 +395,18 @@ mod tests {
         assert_eq!(info.download, Some(200));
         assert_eq!(info.total, Some(1000));
         assert_eq!(info.expire, Some(1780000000));
+    }
+
+    #[test]
+    fn test_parse_userinfo_from_base64_node_remarks() {
+        use base64::Engine as _;
+
+        let content = "hysteria2://example:443#%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A47.85%20GB\nhysteria2://example:443#%E5%A5%97%E9%A4%90%E5%88%B0%E6%9C%9F%EF%BC%9A2027-11-14";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+        let info = parse_userinfo_from_body(&encoded);
+
+        assert_eq!(info.remaining, Some(51_378_546_278));
+        assert!(info.expire.is_some());
     }
 
     #[test]

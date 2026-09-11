@@ -286,25 +286,22 @@
                     </div>
                     <div class="rule-card-actions">
                       <button
-                        class="btn btn-sm btn-secondary"
-                        title="同步此规则至 DNS 分流规则"
-                        @click="$emit('syncRule', rule, 'route', idx)"
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === 0"
+                        aria-label="向前移动"
+                        title="向前移动（提高优先级）"
+                        @click="moveItemByFilter(configData.route.rules, rule, -1)"
                       >
-                        <svg
-                          width="13"
-                          height="13"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          stroke-width="2.5"
-                          style="margin-right: 4px"
-                        >
-                          <path d="M23 4v6h-6M1 20v-6h6" />
-                          <path
-                            d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
-                          />
-                        </svg>
-                        同步
+                        ←
+                      </button>
+                      <button
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === configData.route.rules.length - 1"
+                        aria-label="向后移动"
+                        title="向后移动（降低优先级）"
+                        @click="moveItemByFilter(configData.route.rules, rule, 1)"
+                      >
+                        →
                       </button>
                       <button
                         class="btn btn-sm btn-secondary"
@@ -404,27 +401,6 @@
                       >
                         <path d="M12 5v14M5 12l7 7 7-7" />
                       </svg>
-                    </button>
-                    <button
-                      class="btn btn-sm btn-secondary"
-                      title="同步此规则至 DNS 分流规则"
-                      @click="
-                        $emit('syncRule', rule, 'route', getRealIndex(rule))
-                      "
-                    >
-                      <svg
-                        width="13"
-                        height="13"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2.5"
-                        style="margin-right: 4px"
-                      >
-                        <path d="M23 4v6h-6M1 20v-6h6" />
-                        <path d="M3.51 9a9 9 0 0 0 20.49 15" />
-                      </svg>
-                      同步
                     </button>
                     <button
                       class="btn btn-sm btn-secondary"
@@ -630,7 +606,7 @@ const props = defineProps({
   editItem: { type: Function, default: null },
 });
 
-defineEmits(["syncRule", "openDomainWizard"]);
+defineEmits(["openDomainWizard"]);
 
 const searchQuery = ref("");
 const openSections = ref(["rules", "rulesets"]);

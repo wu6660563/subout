@@ -742,7 +742,7 @@ pub async fn create_history_config(
     };
 
     conn.execute(
-        "INSERT INTO config_history (change_type, action, detail, content, updated_at) VALUES ('配置列表', '创建配置', ?, ?, datetime('now', 'localtime'))",
+        "INSERT INTO config_history (sort_order, change_type, action, detail, content, updated_at) VALUES ((SELECT COALESCE(MAX(sort_order), -1) + 1 FROM config_history WHERE change_type IN ('配置列表', '模板配置')), '配置列表', '创建配置', ?, ?, datetime('now', 'localtime'))",
         rusqlite::params![payload.detail, content_str],
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("写入数据库失败: {}", e)))?;
@@ -774,6 +774,37 @@ pub async fn create_history_config(
     }
 
     Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateHistoryOrderRequest {
+    pub sort_order: i64,
+}
+
+pub async fn update_history_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpdateHistoryOrderRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)
+        .await
+        .map_err(|status| (status, "未授权".to_string()))?;
+    if payload.sort_order < 0 {
+        return Err((StatusCode::BAD_REQUEST, "排序值不能小于 0".to_string()));
+    }
+    let conn =
+        get_db_conn(&state.db_path).map_err(|status| (status, "数据库连接失败".to_string()))?;
+    let changed = conn
+        .execute(
+            "UPDATE config_history SET sort_order = ? WHERE id = ? AND change_type IN ('配置列表', '模板配置')",
+            rusqlite::params![payload.sort_order, id],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("更新排序值失败: {}", e)))?;
+    if changed == 0 {
+        return Err((StatusCode::NOT_FOUND, "配置项不存在".to_string()));
+    }
+    Ok(StatusCode::OK)
 }
 
 #[derive(Deserialize)]

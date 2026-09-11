@@ -109,6 +109,7 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS config_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
             change_type TEXT NOT NULL,
             action TEXT NOT NULL,
             detail TEXT NOT NULL,
@@ -118,6 +119,34 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
         )",
         [],
     )?;
+
+    // Migration: add a stable, user-editable order for configuration history.
+    let has_sort_order_col: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('config_history') WHERE name='sort_order'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_sort_order_col == 0 {
+        let _ = conn.execute(
+            "ALTER TABLE config_history ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let ids = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM config_history WHERE change_type IN ('配置列表', '模板配置') ORDER BY id DESC",
+            )?;
+            stmt.query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (sort_order, id) in ids.into_iter().enumerate() {
+            let _ = conn.execute(
+                "UPDATE config_history SET sort_order = ? WHERE id = ?",
+                rusqlite::params![sort_order as i64, id],
+            );
+        }
+    }
 
     // Migration: check if config_history has updated_at column
     let has_updated_at_col: i64 = conn
@@ -177,7 +206,20 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
         let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN upload INTEGER", []);
         let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN download INTEGER", []);
         let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN total INTEGER", []);
+        let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN remaining INTEGER", []);
         let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN expire INTEGER", []);
+    }
+
+    // Migration: check if subscriptions has remaining traffic column
+    let has_remaining_col: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='remaining'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_remaining_col == 0 {
+        let _ = conn.execute("ALTER TABLE subscriptions ADD COLUMN remaining INTEGER", []);
     }
 
     // Migration: check if nodes has last_tcp_latency column
@@ -326,7 +368,7 @@ pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
 }
 
 pub fn get_subscriptions(conn: &Connection) -> Result<Vec<Subscription>> {
-    let mut stmt = conn.prepare("SELECT id, url, label, enabled, last_fetched, last_error, filter_keywords, delete_on_update, upload, download, total, expire FROM subscriptions")?;
+    let mut stmt = conn.prepare("SELECT id, url, label, enabled, last_fetched, last_error, filter_keywords, delete_on_update, upload, download, total, remaining, expire FROM subscriptions")?;
     let subs = stmt
         .query_map([], |row| {
             let enabled_int: i32 = row.get(3)?;
@@ -343,7 +385,8 @@ pub fn get_subscriptions(conn: &Connection) -> Result<Vec<Subscription>> {
                 upload: row.get(8)?,
                 download: row.get(9)?,
                 total: row.get(10)?,
-                expire: row.get(11)?,
+                remaining: row.get(11)?,
+                expire: row.get(12)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -920,27 +963,37 @@ pub fn log_history(
     detail: &str,
     content: Option<&str>,
 ) -> Result<()> {
+    let sort_order = if change_type == "配置列表" || change_type == "模板配置" {
+        conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM config_history WHERE change_type IN ('配置列表', '模板配置')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
+    } else {
+        0
+    };
     conn.execute(
-        "INSERT INTO config_history (change_type, action, detail, content, updated_at) VALUES (?, ?, ?, ?, datetime('now', 'localtime'))",
-        params![change_type, action, detail, content],
+        "INSERT INTO config_history (sort_order, change_type, action, detail, content, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))",
+        params![sort_order, change_type, action, detail, content],
     )?;
     Ok(())
 }
 
 pub fn get_config_history(conn: &Connection) -> Result<Vec<ConfigHistory>> {
     let mut stmt = conn.prepare(
-        "SELECT id, change_type, action, detail, created_at, COALESCE(updated_at, created_at) as updated_at FROM config_history WHERE change_type IN ('配置列表', '模板配置') ORDER BY id DESC",
+        "SELECT id, sort_order, change_type, action, detail, created_at, COALESCE(updated_at, created_at) as updated_at FROM config_history WHERE change_type IN ('配置列表', '模板配置') ORDER BY sort_order ASC, id DESC",
     )?;
     let history = stmt
         .query_map([], |row| {
             Ok(ConfigHistory {
                 id: row.get(0)?,
-                change_type: row.get(1)?,
-                action: row.get(2)?,
-                detail: row.get(3)?,
+                sort_order: row.get(1)?,
+                change_type: row.get(2)?,
+                action: row.get(3)?,
+                detail: row.get(4)?,
                 content: None,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -949,18 +1002,19 @@ pub fn get_config_history(conn: &Connection) -> Result<Vec<ConfigHistory>> {
 
 pub fn get_config_history_detail(conn: &Connection, id: i64) -> Result<Option<ConfigHistory>> {
     let mut stmt = conn.prepare(
-        "SELECT id, change_type, action, detail, content, created_at, COALESCE(updated_at, created_at) as updated_at FROM config_history WHERE id = ?"
+        "SELECT id, sort_order, change_type, action, detail, content, created_at, COALESCE(updated_at, created_at) as updated_at FROM config_history WHERE id = ?"
     )?;
     let mut rows = stmt.query([id])?;
     if let Some(row) = rows.next()? {
         Ok(Some(ConfigHistory {
             id: row.get(0)?,
-            change_type: row.get(1)?,
-            action: row.get(2)?,
-            detail: row.get(3)?,
-            content: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            sort_order: row.get(1)?,
+            change_type: row.get(2)?,
+            action: row.get(3)?,
+            detail: row.get(4)?,
+            content: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         }))
     } else {
         Ok(None)

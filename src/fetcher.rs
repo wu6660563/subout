@@ -12,7 +12,7 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let s: Subscription = conn.query_row(
-            "SELECT id, url, label, enabled, last_fetched, last_error, filter_keywords, delete_on_update, upload, download, total, expire FROM subscriptions WHERE id = ?",
+            "SELECT id, url, label, enabled, last_fetched, last_error, filter_keywords, delete_on_update, upload, download, total, remaining, expire FROM subscriptions WHERE id = ?",
             [sub_id],
             |row| {
                 let enabled_int: i32 = row.get(3)?;
@@ -29,7 +29,8 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
                     upload: row.get(8)?,
                     download: row.get(9)?,
                     total: row.get(10)?,
-                    expire: row.get(11)?,
+                    remaining: row.get(11)?,
+                    expire: row.get(12)?,
                 })
             },
         )?;
@@ -162,8 +163,8 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
 
             // Update subscription success status & userinfo
             tx.execute(
-                "UPDATE subscriptions SET last_fetched = ?, last_error = NULL, upload = ?, download = ?, total = ?, expire = ? WHERE id = ?",
-                params![now_str, userinfo.upload, userinfo.download, userinfo.total, userinfo.expire, sub_id],
+                "UPDATE subscriptions SET last_fetched = ?, last_error = NULL, upload = ?, download = ?, total = ?, remaining = ?, expire = ? WHERE id = ?",
+                params![now_str, userinfo.upload, userinfo.download, userinfo.total, userinfo.remaining, userinfo.expire, sub_id],
             )?;
 
             tx.commit()?;

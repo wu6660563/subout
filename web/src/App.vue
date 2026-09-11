@@ -970,6 +970,13 @@ watch(token, (newToken) => {
 });
 
 let globalStatusTimer = null;
+let browserPresenceTimer = null;
+
+const sendBrowserPresence = () => {
+  fetch(`${API_BASE}/api/system/browser-presence`, { method: "POST" }).catch(
+    () => {},
+  );
+};
 
 onMounted(() => {
   const savedTheme = localStorage.getItem("theme-preference") || "system";
@@ -979,6 +986,8 @@ onMounted(() => {
   mediaQuery.addEventListener("change", handleSystemThemeChange);
 
   verifyToken();
+  sendBrowserPresence();
+  browserPresenceTimer = setInterval(sendBrowserPresence, 1200);
 
   window.addEventListener("hashchange", handleRouting);
 
@@ -993,6 +1002,7 @@ onUnmounted(() => {
   mediaQuery.removeEventListener("change", handleSystemThemeChange);
   window.removeEventListener("hashchange", handleRouting);
   if (globalStatusTimer) clearInterval(globalStatusTimer);
+  if (browserPresenceTimer) clearInterval(browserPresenceTimer);
 });
 </script>
 

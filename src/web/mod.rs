@@ -9,6 +9,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use crate::db;
@@ -33,6 +34,78 @@ pub struct AppState {
     pub kernel_download_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub service_manager: Arc<crate::service::SingBoxServiceManager>,
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+const BROWSER_PRESENCE_WINDOW_MS: u64 = 2_000;
+static LAST_BROWSER_PRESENCE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn browser_presence_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn mark_browser_presence() {
+    LAST_BROWSER_PRESENCE_MS.store(browser_presence_now_ms(), Ordering::Relaxed);
+}
+
+fn browser_presence_is_recent(last_presence_ms: u64, now_ms: u64) -> bool {
+    last_presence_ms > 0
+        && now_ms >= last_presence_ms
+        && now_ms - last_presence_ms <= BROWSER_PRESENCE_WINDOW_MS
+}
+
+async fn open_browser_if_needed(port: u16) {
+    tokio::time::sleep(tokio::time::Duration::from_millis(2_200)).await;
+    let now = browser_presence_now_ms();
+    if browser_presence_is_recent(LAST_BROWSER_PRESENCE_MS.load(Ordering::Relaxed), now) {
+        println!("[Server] 检测到已有浏览器页面，跳过重复打开。");
+    } else {
+        open_default_browser(port);
+    }
+}
+
+fn web_url(port: u16) -> String {
+    format!("http://127.0.0.1:{}", port)
+}
+
+async fn bind_available_listener(start_port: u16) -> Result<tokio::net::TcpListener, String> {
+    for offset in 0..=10u16 {
+        let Some(port) = start_port.checked_add(offset) else {
+            break;
+        };
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(_) => continue,
+        }
+    }
+
+    Err(format!(
+        "错误: 端口 {} 到 {} 均已被占用。请手动使用 --port 或 PORT 设置可用端口。",
+        start_port,
+        start_port.saturating_add(10)
+    ))
+}
+
+fn open_default_browser(port: u16) {
+    let url = web_url(port);
+    let result = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&url).spawn()
+    };
+
+    if let Err(error) = result {
+        eprintln!("[Server] 无法自动打开浏览器 {}: {}", url, error);
+    } else {
+        println!("[Server] 已请求默认浏览器打开 {}", url);
+    }
 }
 
 pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
@@ -200,6 +273,10 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
                 .delete(config::delete_history_config),
         )
         .route(
+            "/api/config/history/:id/order",
+            axum::routing::patch(config::update_history_order),
+        )
+        .route(
             "/api/config/history/:id/restore",
             post(config::restore_history_config),
         )
@@ -212,6 +289,10 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         .route("/api/config/schemas/ui", get(config::get_schema_ui_meta))
         // System path & mode
         .route("/api/system/info", get(system::get_system_info))
+        .route(
+            "/api/system/browser-presence",
+            post(system::browser_presence),
+        )
         .route(
             "/api/system/mode",
             get(system::get_system_mode).post(system::set_system_mode),
@@ -273,45 +354,17 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         }
     }
 
-    let listener = if let Some(p) = configured_port {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, p));
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => {
-                println!("[Server] Subout Panel running on http://127.0.0.1:{}", p);
-                l
-            }
-            Err(e) => {
-                return Err(format!("Failed to bind to configured port {}: {}", p, e).into());
-            }
-        }
-    } else {
-        let mut bind_result = None;
-        for i in 0..=10 {
-            let try_port = 1234 + i;
-            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, try_port));
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => {
-                    println!(
-                        "[Server] Subout Panel running on http://127.0.0.1:{}",
-                        try_port
-                    );
-                    bind_result = Some(l);
-                    break;
-                }
-                Err(_) => {
-                    // Port is occupied, continue probing next port
-                }
-            }
-        }
-        if let Some(l) = bind_result {
-            l
-        } else {
-            return Err(
-                "错误: 默认端口 1234 到 1244 均已被占用。请手动使用 PORT 环境变量设置可用端口。"
-                    .into(),
-            );
-        }
-    };
+    let start_port = configured_port.unwrap_or(1234);
+    let listener = bind_available_listener(start_port).await?;
+    let actual_port = listener.local_addr()?.port();
+    println!("[Server] Subout Panel running on {}", web_url(actual_port));
+    if actual_port != start_port {
+        println!(
+            "[Server] 端口 {} 已被占用，已自动切换到 {}",
+            start_port, actual_port
+        );
+    }
+    tokio::spawn(open_browser_if_needed(actual_port));
 
     let mut shutdown_signal_rx = shutdown_rx.clone();
     let shutdown_signal = async move {
@@ -454,6 +507,30 @@ async fn get_dashboard_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_presence_is_recent_only_inside_detection_window() {
+        assert!(!browser_presence_is_recent(0, 1_000));
+        assert!(browser_presence_is_recent(1_000, 2_000));
+        assert!(!browser_presence_is_recent(1_000, 3_001));
+    }
+
+    #[test]
+    fn web_url_uses_the_actual_listening_port() {
+        assert_eq!(web_url(1234), "http://127.0.0.1:1234");
+        assert_eq!(web_url(1235), "http://127.0.0.1:1235");
+    }
+
+    #[tokio::test]
+    async fn bind_available_listener_moves_to_next_port_when_requested_port_is_busy() {
+        let occupied = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let listener = bind_available_listener(occupied_port).await.unwrap();
+        assert_ne!(listener.local_addr().unwrap().port(), occupied_port);
+    }
 
     #[tokio::test]
     async fn check_auth_allows_requests_when_login_is_disabled() {

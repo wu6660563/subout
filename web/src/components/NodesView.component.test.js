@@ -537,6 +537,53 @@ describe("NodesView - 节点池管理", () => {
       expect(body.target_url).toBe("http://cp.cloudflare.com/generate_204");
     });
 
+    it("无已选节点时按当前筛选结果进行批量测速", async () => {
+      const filteredNode = mockNodes[0];
+      const baseFetch = createMockFetch();
+      const fetchMock = vi.fn((url, options) => {
+        const urlString = String(url);
+        if (urlString.includes("limit=999999")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({ nodes: [filteredNode], total: 1 }),
+            text: () => Promise.resolve(""),
+          });
+        }
+        return baseFetch(url, options);
+      });
+      const wrapper = await mountNodesView(fetchMock);
+      const searchInput = wrapper.find(
+        'input[placeholder="搜索节点名称/服务器..."]',
+      );
+      await searchInput.setValue("节点A");
+      await flushPromises();
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text().includes("节点测速"))
+        .trigger("click");
+      await flushPromises();
+
+      const allNodesRequest = fetchMock.mock.calls.find(([url]) =>
+        String(url).includes("limit=999999"),
+      );
+      expect(allNodesRequest[0]).toContain("search=%E8%8A%82%E7%82%B9A");
+
+      await wrapper
+        .findAll(".modal button")
+        .find((button) => button.text().includes("开始测试"))
+        .trigger("click");
+      await flushPromises();
+
+      const pingCall = fetchMock.mock.calls.find(
+        ([url, options]) => url === "/api/nodes/ping" && options?.method === "POST",
+      );
+      expect(pingCall).toBeDefined();
+      expect(JSON.parse(pingCall[1].body).ids).toEqual([filteredNode.id]);
+    });
+
     it("选择自定义网址模式，能输入自定义 URL 并发送", async () => {
       const wrapper = await mountNodesView();
       const pingBtn = wrapper

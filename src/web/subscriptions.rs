@@ -64,6 +64,7 @@ pub async fn add_subscription(
         upload: None,
         download: None,
         total: None,
+        remaining: None,
         expire: None,
     };
     Ok(Json(sub))

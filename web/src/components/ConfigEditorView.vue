@@ -123,6 +123,7 @@
               <tr>
                 <th style="width: 80px">ID</th>
                 <th>配置备注 / 名称</th>
+                <th style="width: 120px">排序值</th>
                 <th>创建时间</th>
                 <th>最后更新时间</th>
                 <th style="text-align: right; width: 400px">操作</th>
@@ -133,6 +134,21 @@
                 <td style="font-family: var(--font-mono)">#{{ item.id }}</td>
                 <td>
                   <strong>{{ item.detail || "未命名配置" }}</strong>
+                </td>
+                <td class="config-sort-cell">
+                  <div class="config-sort-control" title="数值越小越靠前">
+                    <span class="config-sort-prefix">#</span>
+                  <input
+                    v-model.number="item.sort_order"
+                    aria-label="配置排序值"
+                    class="input-control table-input config-sort-input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    @change="updateConfigSortOrder(item)"
+                  />
+                    <span class="config-sort-suffix">位</span>
+                  </div>
                 </td>
                 <td style="color: var(--text-muted); font-size: 0.85rem">
                   {{ item.created_at }}
@@ -185,7 +201,7 @@
               </tr>
               <tr v-if="configList.length === 0">
                 <td
-                  colspan="5"
+                  colspan="6"
                   style="text-align: center; color: var(--text-muted)"
                 >
                   暂无保存的配置模板。
@@ -5931,18 +5947,62 @@ const basicOutbounds = computed(() => {
   );
 });
 
-const proxyOutbounds = computed(() => {
-  return (configData.outbounds || []).filter(
-    (outb) =>
-      !["direct", "block", "dns", "selector", "urltest"].includes(outb.type),
-  );
-});
+const isGroupOutbound = (outbound) =>
+  ["selector", "urltest"].includes(outbound?.type);
 
-const groupOutbounds = computed(() => {
-  return (configData.outbounds || []).filter((outb) =>
-    ["selector", "urltest"].includes(outb.type),
+const isProxyOutbound = (outbound) =>
+  !!outbound &&
+  !["direct", "block", "dns", "selector", "urltest"].includes(
+    outbound.type,
   );
-});
+
+const proxyOutbounds = computed(() =>
+  (configData.outbounds || []).filter(isProxyOutbound),
+);
+
+const groupOutbounds = computed(() =>
+  (configData.outbounds || []).filter(isGroupOutbound),
+);
+
+const removeGroupsAndOrphanedProxyNodes = (groupTags) => {
+  const tagsToRemove = new Set(groupTags);
+  const allOutbounds = configData.outbounds || [];
+  const removedGroups = allOutbounds.filter(
+    (outbound) =>
+      tagsToRemove.has(outbound.tag) && isGroupOutbound(outbound),
+  );
+  const candidateNodeTags = new Set(
+    removedGroups.flatMap((group) =>
+      Array.isArray(group.outbounds) ? group.outbounds : [],
+    ),
+  );
+  const remainingOutbounds = allOutbounds.filter(
+    (outbound) =>
+      !(tagsToRemove.has(outbound.tag) && isGroupOutbound(outbound)),
+  );
+  const referencedByRemainingGroups = new Set(
+    remainingOutbounds
+      .filter(isGroupOutbound)
+      .flatMap((group) =>
+        Array.isArray(group.outbounds) ? group.outbounds : [],
+      ),
+  );
+  const orphanedProxyTags = new Set(
+    remainingOutbounds
+      .filter(
+        (outbound) =>
+          candidateNodeTags.has(outbound.tag) &&
+          isProxyOutbound(outbound) &&
+          !referencedByRemainingGroups.has(outbound.tag),
+      )
+      .map((outbound) => outbound.tag),
+  );
+
+  configData.outbounds = remainingOutbounds.filter(
+    (outbound) => !orphanedProxyTags.has(outbound.tag),
+  );
+  return orphanedProxyTags.size;
+};
 
 // 策略组批量删除
 const selectedGroupTags = ref([]);
@@ -5968,12 +6028,15 @@ const batchRemoveGroups = async () => {
   );
   if (!confirmed) return;
 
-  const removeTagsSet = new Set(selectedGroupTags.value);
-  configData.outbounds = (configData.outbounds || []).filter(
-    (o) => !removeTagsSet.has(o.tag),
+  const removedNodeCount = removeGroupsAndOrphanedProxyNodes(
+    selectedGroupTags.value,
   );
   selectedGroupTags.value = [];
-  showToast(`已批量删除选中的 ${count} 个策略组`);
+  showToast(
+    `已批量删除选中的 ${count} 个策略组${
+      removedNodeCount > 0 ? `，并移除 ${removedNodeCount} 个孤立代理节点` : ""
+    }`,
+  );
 };
 
 // 代理节点批量删除
@@ -7451,6 +7514,34 @@ const loadConfigList = async () => {
   }
 };
 
+const updateConfigSortOrder = async (item) => {
+  const sortOrder = Number(item.sort_order);
+  if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+    showToast("排序值必须是大于等于 0 的整数", "warning");
+    await loadConfigList();
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/config/history/${item.id}/order`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token.value}`,
+      },
+      body: JSON.stringify({ sort_order: sortOrder }),
+    });
+    if (res.ok) {
+      await loadConfigList();
+    } else {
+      showToast("保存排序值失败", "danger");
+      await loadConfigList();
+    }
+  } catch {
+    showToast("保存排序值网络请求失败", "danger");
+    await loadConfigList();
+  }
+};
+
 const selectConfig = async (id) => {
   if (!id) return;
   currentConfigId.value = id;
@@ -8738,8 +8829,19 @@ const confirmRemoveOutbound = async (idx) => {
     { isDanger: true },
   );
   if (confirmed) {
-    configData.outbounds.splice(idx, 1);
-    showToast(`已删除出站连接: ${outb.tag}`);
+    if (isGroupOutbound(outb)) {
+      const removedNodeCount = removeGroupsAndOrphanedProxyNodes([outb.tag]);
+      showToast(
+        `已删除策略组: ${outb.tag}${
+          removedNodeCount > 0
+            ? `，并移除 ${removedNodeCount} 个孤立代理节点`
+            : ""
+        }`,
+      );
+    } else {
+      configData.outbounds.splice(idx, 1);
+      showToast(`已删除出站连接: ${outb.tag}`);
+    }
   }
 };
 

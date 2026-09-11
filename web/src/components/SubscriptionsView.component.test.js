@@ -152,6 +152,23 @@ describe("SubscriptionsView - 订阅管理", () => {
       expect(wrapper.text()).toContain("5.00 GB / 100.00 GB");
       expect(wrapper.text()).toMatch(/剩 (29|30) 天/);
     });
+
+    it("显示从订阅节点备注中解析出的剩余流量", async () => {
+      const wrapper = await mountSubsView(
+        createMockFetch({
+          subs: [
+            {
+              ...mockSubs[0],
+              label: "顶级机场",
+              remaining: 47.85 * 1024 ** 3,
+            },
+          ],
+        }),
+      );
+
+      expect(wrapper.text()).toContain("顶级机场");
+      expect(wrapper.text()).toContain("剩余 47.85 GB");
+    });
   });
 
   describe("添加订阅 modal", () => {

@@ -253,6 +253,22 @@ describe("DnsEditor", () => {
       const handles = wrapper.findAll(".drag-handle");
       expect(handles.length).toBe(4); // 2 servers + 2 rules
     });
+
+    it("moves DNS servers and rules with previous/next controls", async () => {
+      const config = JSON.parse(JSON.stringify(mockConfigData));
+      const wrapper = mountDnsEditor(config);
+      const serverCards = wrapper.findAll(".rule-card").slice(0, 2);
+      const ruleCards = wrapper.findAll(".rule-card").slice(2, 4);
+
+      await serverCards[1].find("button[aria-label='向前移动']").trigger("click");
+      await ruleCards[1].find("button[aria-label='向前移动']").trigger("click");
+
+      expect(config.dns.servers.map((server) => server.tag)).toEqual([
+        "dns-local",
+        "dns-google",
+      ]);
+      expect(config.dns.rules[0].server).toBe("dns-local");
+    });
   });
 
   describe("Server type tag colors", () => {

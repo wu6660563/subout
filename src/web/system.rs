@@ -8,6 +8,11 @@ use std::path::PathBuf;
 
 use crate::web::{AppState, check_auth, get_db_conn};
 
+pub async fn browser_presence() -> StatusCode {
+    crate::web::mark_browser_presence();
+    StatusCode::NO_CONTENT
+}
+
 #[derive(Deserialize)]
 pub struct DirQuery {
     pub path: Option<String>,

@@ -325,6 +325,24 @@
                     </div>
                     <div class="rule-card-actions">
                       <button
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === 0"
+                        aria-label="向前移动"
+                        title="向前移动（提高优先级）"
+                        @click="moveItemByFilter(configData.dns.servers, srv, -1)"
+                      >
+                        ←
+                      </button>
+                      <button
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === configData.dns.servers.length - 1"
+                        aria-label="向后移动"
+                        title="向后移动（降低优先级）"
+                        @click="moveItemByFilter(configData.dns.servers, srv, 1)"
+                      >
+                        →
+                      </button>
+                      <button
                         class="btn btn-sm btn-secondary"
                         @click="editServer(srv, idx)"
                       >
@@ -462,6 +480,24 @@
                       />
                     </div>
                     <div class="rule-card-actions">
+                      <button
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === 0"
+                        aria-label="向前移动"
+                        title="向前移动（提高优先级）"
+                        @click="moveItemByFilter(configData.dns.rules, rule, -1)"
+                      >
+                        ←
+                      </button>
+                      <button
+                        class="btn btn-sm btn-secondary order-btn"
+                        :disabled="idx === configData.dns.rules.length - 1"
+                        aria-label="向后移动"
+                        title="向后移动（降低优先级）"
+                        @click="moveItemByFilter(configData.dns.rules, rule, 1)"
+                      >
+                        →
+                      </button>
                       <button
                         class="btn btn-sm btn-secondary"
                         title="同步此规则至路由规则"

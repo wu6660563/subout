@@ -13,6 +13,7 @@ pub struct Subscription {
     pub upload: Option<i64>,
     pub download: Option<i64>,
     pub total: Option<i64>,
+    pub remaining: Option<i64>,
     pub expire: Option<i64>,
 }
 
@@ -70,6 +71,7 @@ pub struct NodesPage {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConfigHistory {
     pub id: i64,
+    pub sort_order: i64,
     pub change_type: String,
     pub action: String,
     pub detail: String,

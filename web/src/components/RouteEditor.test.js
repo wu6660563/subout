@@ -182,6 +182,20 @@ describe("RouteEditor", () => {
       expect(wrapper.find(".el-alert").exists()).toBe(false);
     });
 
+    it("does not show sync buttons for route rules", async () => {
+      const wrapper = mountRouteEditor(mockConfigData);
+      const syncButtons = () =>
+        wrapper.findAll("button").filter((button) => button.text().trim() === "同步");
+
+      expect(syncButtons()).toHaveLength(0);
+
+      const searchInput = wrapper.find(".search-filter-bar input");
+      await searchInput.setValue("CN");
+      await flushPromises();
+
+      expect(syncButtons()).toHaveLength(0);
+    });
+
     it("shows empty state when no rules or rulesets", () => {
       const wrapper = mountRouteEditor(emptyConfigData);
       expect(wrapper.findAll(".rule-empty-state").length).toBe(2);
@@ -229,6 +243,17 @@ describe("RouteEditor", () => {
       const wrapper = mountRouteEditor(mockConfigData);
       const handles = wrapper.findAll(".drag-handle");
       expect(handles.length).toBe(4); // 3 rules + 1 ruleset
+    });
+
+    it("moves route rules with previous/next controls", async () => {
+      const config = JSON.parse(JSON.stringify(mockConfigData));
+      const wrapper = mountRouteEditor(config);
+      const ruleCards = wrapper.findAll(".rule-card").slice(0, 3);
+
+      await ruleCards[1].find("button[aria-label='向前移动']").trigger("click");
+
+      expect(config.route.rules[0].outbound).toBe("direct");
+      expect(config.route.rules[1].outbound).toBe("proxy");
     });
   });
 
