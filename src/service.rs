@@ -1175,7 +1175,7 @@ impl SingBoxServiceManager {
         let cached_pass = self.cached_sudo_pass.read().await.clone();
         if let Some(port) = get_mixed_port_from_config(config_json) {
             platform.enable_system_proxy(port, cached_pass.as_deref());
-            if platform.is_macos() || platform.is_windows() {
+            if platform.is_linux() || platform.is_macos() || platform.is_windows() {
                 self.append_log(&format!("🌐 已自动设置系统网络代理 (127.0.0.1:{})", port))
                     .await;
             }
@@ -1285,7 +1285,7 @@ impl SingBoxServiceManager {
 
         platform.disable_system_proxy(cached_pass.as_deref());
         platform.disable_tun_dns(cached_pass.as_deref());
-        if platform.is_macos() || platform.is_windows() {
+        if platform.is_linux() || platform.is_macos() || platform.is_windows() {
             self.append_log("🌐 已恢复系统原始网络代理设置").await;
         }
 

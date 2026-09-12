@@ -66,7 +66,8 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
             port INTEGER NOT NULL,
             raw_json TEXT NOT NULL,
             enabled INTEGER DEFAULT 1,
-            is_custom INTEGER DEFAULT 0
+            is_custom INTEGER DEFAULT 0,
+            auto_update_failures INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
@@ -262,6 +263,21 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
         if has_col == 0 {
             let _ = conn.execute(&format!("ALTER TABLE nodes ADD COLUMN {} TEXT", col), []);
         }
+    }
+
+    // Migration: protect subscription nodes from removal after one transient outage.
+    let has_auto_update_failures: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='auto_update_failures'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_auto_update_failures == 0 {
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN auto_update_failures INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
     }
 
     // Migration: check if outbound_groups has dynamic filter columns

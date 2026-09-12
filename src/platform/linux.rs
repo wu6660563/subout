@@ -3,11 +3,81 @@ use anyhow::Result;
 use anyhow::anyhow;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::platform::{BoxFuture, PlatformStrategy};
 use crate::service::ConflictingProcessInfo;
 
 pub struct LinuxPlatform;
+
+#[derive(Clone, Debug)]
+struct GnomeProxyState {
+    mode: String,
+    http_host: String,
+    http_port: String,
+    https_host: String,
+    https_port: String,
+    socks_host: String,
+    socks_port: String,
+}
+
+static GNOME_PROXY_STATE: OnceLock<Mutex<Option<GnomeProxyState>>> = OnceLock::new();
+
+fn proxy_backend_for_desktop(desktop: &str) -> Option<&'static str> {
+    let desktop = desktop.to_ascii_lowercase();
+    if desktop.contains("gnome") || desktop.contains("unity") || desktop.contains("cinnamon") {
+        Some("gsettings")
+    } else if desktop.contains("kde") || desktop.contains("plasma") {
+        Some("kwriteconfig")
+    } else {
+        None
+    }
+}
+
+fn parse_gsettings_value(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("uint32 ")
+        .unwrap_or(value.trim())
+        .to_string()
+}
+
+fn command_output(command: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| parse_gsettings_value(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn run_command(command: &str, args: &[&str]) -> bool {
+    std::process::Command::new(command)
+        .args(args)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn gsettings_get(key: &str) -> Option<String> {
+    command_output("gsettings", &["get", "org.gnome.system.proxy", key])
+}
+
+fn gsettings_set(key: &str, value: &str) -> bool {
+    run_command("gsettings", &["set", "org.gnome.system.proxy", key, value])
+}
+
+fn save_gnome_proxy_state() -> Option<GnomeProxyState> {
+    Some(GnomeProxyState {
+        mode: gsettings_get("mode")?,
+        http_host: gsettings_get("http host")?,
+        http_port: gsettings_get("http port")?,
+        https_host: gsettings_get("https host")?,
+        https_port: gsettings_get("https port")?,
+        socks_host: gsettings_get("socks host")?,
+        socks_port: gsettings_get("socks port")?,
+    })
+}
 
 impl PlatformStrategy for LinuxPlatform {
     fn os_name(&self) -> &'static str {
@@ -607,9 +677,126 @@ impl PlatformStrategy for LinuxPlatform {
         }
     }
 
-    fn enable_system_proxy(&self, _port: u16, _sudo_pass: Option<&str>) {}
+    fn enable_system_proxy(&self, port: u16, _sudo_pass: Option<&str>) {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .or_else(|_| std::env::var("XDG_SESSION_DESKTOP"))
+            .unwrap_or_default();
+        match proxy_backend_for_desktop(&desktop) {
+            Some("gsettings") => {
+                let state = save_gnome_proxy_state();
+                let lock = GNOME_PROXY_STATE.get_or_init(|| Mutex::new(None));
+                if let Ok(mut saved) = lock.lock() {
+                    if saved.is_none() {
+                        *saved = state;
+                    }
+                }
+                let port = port.to_string();
+                let _ = gsettings_set("mode", "manual");
+                let _ = gsettings_set("http host", "127.0.0.1");
+                let _ = gsettings_set("http port", &port);
+                let _ = gsettings_set("https host", "127.0.0.1");
+                let _ = gsettings_set("https port", &port);
+                let _ = gsettings_set("socks host", "127.0.0.1");
+                let _ = gsettings_set("socks port", &port);
+            }
+            Some("kwriteconfig") => {
+                let port = port.to_string();
+                let command = if run_command("kwriteconfig6", &["--version"]) {
+                    "kwriteconfig6"
+                } else {
+                    "kwriteconfig5"
+                };
+                let _ = run_command(
+                    command,
+                    &[
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "ProxyType",
+                        "1",
+                    ],
+                );
+                let _ = run_command(
+                    command,
+                    &[
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "httpProxy",
+                        &format!("http://127.0.0.1:{}", port),
+                    ],
+                );
+                let _ = run_command(
+                    command,
+                    &[
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "httpsProxy",
+                        &format!("http://127.0.0.1:{}", port),
+                    ],
+                );
+                let _ = run_command(
+                    command,
+                    &[
+                        "--file",
+                        "kioslaverc",
+                        "--group",
+                        "Proxy Settings",
+                        "--key",
+                        "socksProxy",
+                        &format!("socks://127.0.0.1:{}", port),
+                    ],
+                );
+            }
+            _ => {}
+        }
+    }
 
-    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) {}
+    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) {
+        if let Some(lock) = GNOME_PROXY_STATE.get()
+            && let Ok(mut saved) = lock.lock()
+            && let Some(state) = saved.take()
+        {
+            let _ = gsettings_set("mode", &state.mode);
+            let _ = gsettings_set("http host", &state.http_host);
+            let _ = gsettings_set("http port", &state.http_port);
+            let _ = gsettings_set("https host", &state.https_host);
+            let _ = gsettings_set("https port", &state.https_port);
+            let _ = gsettings_set("socks host", &state.socks_host);
+            let _ = gsettings_set("socks port", &state.socks_port);
+            return;
+        }
+
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .or_else(|_| std::env::var("XDG_SESSION_DESKTOP"))
+            .unwrap_or_default();
+        if proxy_backend_for_desktop(&desktop) == Some("kwriteconfig") {
+            let command = if run_command("kwriteconfig6", &["--version"]) {
+                "kwriteconfig6"
+            } else {
+                "kwriteconfig5"
+            };
+            let _ = run_command(
+                command,
+                &[
+                    "--file",
+                    "kioslaverc",
+                    "--group",
+                    "Proxy Settings",
+                    "--key",
+                    "ProxyType",
+                    "0",
+                ],
+            );
+        }
+    }
 
     fn enable_tun_dns(&self, _dns_ip: &str, _sudo_pass: Option<&str>) {}
 
@@ -702,5 +889,24 @@ impl PlatformStrategy for LinuxPlatform {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses_gsettings_string_and_integer_values() {
+        assert_eq!(super::parse_gsettings_value("'manual'"), "'manual'");
+        assert_eq!(super::parse_gsettings_value("uint32 3128"), "3128");
+    }
+
+    #[test]
+    fn detects_supported_desktop_proxy_backend() {
+        assert_eq!(super::proxy_backend_for_desktop("GNOME"), Some("gsettings"));
+        assert_eq!(
+            super::proxy_backend_for_desktop("KDE"),
+            Some("kwriteconfig")
+        );
+        assert_eq!(super::proxy_backend_for_desktop("sway"), None);
     }
 }

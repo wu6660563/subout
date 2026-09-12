@@ -6,6 +6,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
+const AUTO_UPDATE_FAILURE_THRESHOLD: i64 = 3;
+
+fn should_remove_failed_node(consecutive_failures: i64) -> bool {
+    consecutive_failures >= AUTO_UPDATE_FAILURE_THRESHOLD
+}
+
 pub async fn check_and_run_auto_update(
     db_path: &str,
     service_manager: Option<Arc<crate::service::SingBoxServiceManager>>,
@@ -179,8 +185,8 @@ pub async fn run_auto_update_process(
             update_log(&format!("  -> {}", res));
         }
 
-        // Step 3: Conduct speed test on all nodes and delete timed-out nodes
-        update_log("步骤 3: 订阅源更新完成，开始执行节点延迟测速并清理超时节点...");
+        // Step 3: Conduct speed test and quarantine only repeatedly failing nodes.
+        update_log("步骤 3: 订阅源更新完成，开始执行节点延迟测速；连续失败节点才会被清理...");
         let nodes = {
             let conn_nodes = Connection::open(db_path)?;
             conn_nodes.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -214,6 +220,7 @@ pub async fn run_auto_update_process(
         }
 
         let mut deleted_count = 0;
+        let mut retained_failure_count = 0;
         let mut deleted_tags = Vec::new();
         let mut task_results = Vec::new();
         for task in tasks {
@@ -231,20 +238,33 @@ pub async fn run_auto_update_process(
                     let now_str_test = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                     let lat_val = lat as i64;
                     tx.execute(
-                        "UPDATE nodes SET last_web_latency = ?, last_tested_at = ?, last_target_url = ? WHERE id = ?",
+                        "UPDATE nodes SET last_web_latency = ?, last_tested_at = ?, last_target_url = ?, auto_update_failures = 0 WHERE id = ?",
                         rusqlite::params![lat_val, now_str_test, test_url, id],
                     )?;
                 } else {
-                    tx.execute("DELETE FROM nodes WHERE id = ?", [id])?;
-                    deleted_count += 1;
-                    deleted_tags.push(tag);
+                    let failures: i64 = tx.query_row(
+                        "SELECT COALESCE(auto_update_failures, 0) + 1 FROM nodes WHERE id = ?",
+                        [id],
+                        |row| row.get(0),
+                    )?;
+                    if should_remove_failed_node(failures) {
+                        tx.execute("DELETE FROM nodes WHERE id = ?", [id])?;
+                        deleted_count += 1;
+                        deleted_tags.push(tag);
+                    } else {
+                        retained_failure_count += 1;
+                        tx.execute(
+                            "UPDATE nodes SET last_web_latency = -1, last_tested_at = ?, last_target_url = ?, auto_update_failures = ? WHERE id = ?",
+                            rusqlite::params![Local::now().format("%Y-%m-%d %H:%M:%S").to_string(), test_url, failures, id],
+                        )?;
+                    }
                 }
             }
             tx.commit()?;
         }
         update_log(&format!(
-            "  -> 测速完成，共删除超时节点 {} 个: {:?}",
-            deleted_count, deleted_tags
+            "  -> 测速完成，保留暂时失败节点 {} 个，连续失败达到 {} 次后删除节点 {} 个: {:?}",
+            retained_failure_count, AUTO_UPDATE_FAILURE_THRESHOLD, deleted_count, deleted_tags
         ));
 
         // Step 4: Auto-configure nodes in all groups that have "conditional auto-matching" enabled
@@ -472,6 +492,12 @@ pub fn build_updated_outbounds(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_update_requires_three_consecutive_failures_before_removal() {
+        assert!(!super::should_remove_failed_node(1));
+        assert!(!super::should_remove_failed_node(2));
+        assert!(super::should_remove_failed_node(3));
+    }
     use super::*;
     use serde_json::json;
 
