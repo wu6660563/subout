@@ -124,3 +124,40 @@ export function getSelectableNodePoolNodes(nodes, outbounds, sanitizeFn) {
     (n) => getNodePoolStatus(n, outbounds, sanitizeFn).status !== "unchanged",
   );
 }
+
+export function mergeSelectedNodePoolOutbounds({
+  outbounds,
+  nodes,
+  selectedIds,
+  sanitizeFn,
+}) {
+  const nextOutbounds = [...(outbounds || [])];
+  let importedCount = 0;
+  let updatedCount = 0;
+  let skippedCount = 0;
+
+  (selectedIds || []).forEach((id) => {
+    const node = (nodes || []).find((item) => item.id === id);
+    if (!node) return;
+
+    const status = getNodePoolStatus(node, nextOutbounds, sanitizeFn);
+    if (status.status === "unchanged") {
+      skippedCount++;
+      return;
+    }
+
+    const outbound = getParsedNodePoolOutbound(node, sanitizeFn);
+    const existingIndex = nextOutbounds.findIndex(
+      (item) => item.tag === node.tag,
+    );
+    if (existingIndex >= 0) {
+      nextOutbounds.splice(existingIndex, 1, outbound);
+      updatedCount++;
+    } else {
+      nextOutbounds.push(outbound);
+      importedCount++;
+    }
+  });
+
+  return { outbounds: nextOutbounds, importedCount, updatedCount, skippedCount };
+}

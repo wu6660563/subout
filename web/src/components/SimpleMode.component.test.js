@@ -5,7 +5,13 @@ import ModeSelectModal from "./ModeSelectModal.vue";
 import KernelDownloadCard from "./KernelDownloadCard.vue";
 import SimpleConfigView from "./SimpleConfigView.vue";
 import SettingsView from "./SettingsView.vue";
-import { kernelInfo, serviceStatus, appMode } from "../store.js";
+import {
+  kernelInfo,
+  serviceStatus,
+  appMode,
+  sessionSudoPassword,
+  setSessionSudoPassword,
+} from "../store.js";
 
 describe("ModeSelectModal", () => {
   it("renders both simple mode and expert mode options", () => {
@@ -92,6 +98,57 @@ describe("KernelDownloadCard", () => {
 });
 
 describe("SimpleConfigView", () => {
+  it("keeps the sudo password in memory without persisting it to localStorage", () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+
+    setSessionSudoPassword("temporary-secret");
+
+    expect(sessionSudoPassword.value).toBe("temporary-secret");
+    expect(setItem).not.toHaveBeenCalledWith(
+      "subout_sudo_pass",
+      expect.anything(),
+    );
+    expect(removeItem).not.toHaveBeenCalledWith("subout_sudo_pass");
+
+    sessionSudoPassword.value = "";
+    setItem.mockRestore();
+    removeItem.mockRestore();
+  });
+
+  it("syncs all subscriptions through the backend fetch endpoint", async () => {
+    const requests = [];
+    global.fetch = vi.fn().mockImplementation((url, options = {}) => {
+      requests.push({ url: String(url), options });
+
+      if (String(url).includes("/api/nodes")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+      }
+      if (String(url).includes("/api/simple-config")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ config: {}, generated: {} }),
+        });
+      }
+      if (String(url).includes("/api/subscriptions/fetch")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
+    const wrapper = mount(SimpleConfigView);
+    await wrapper.vm.syncSubscriptions();
+
+    const syncRequest = requests.find((request) =>
+      request.url.includes("/api/subscriptions/fetch"),
+    );
+    expect(syncRequest).toBeDefined();
+    expect(syncRequest.url).toContain("/api/subscriptions/fetch");
+    expect(syncRequest.url).not.toContain("/fetch-all");
+    expect(syncRequest.options.method).toBe("POST");
+    expect(syncRequest.options.body).toBe("{}");
+  });
+
   it("renders compact simplified DNS and Route cards with AUTO-Test, TUN, and LocalDNS + FakeIP first", () => {
     global.fetch = vi.fn().mockImplementation((url) => {
       if (url.includes("/api/nodes")) {

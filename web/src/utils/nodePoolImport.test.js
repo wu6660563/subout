@@ -5,6 +5,7 @@ import {
   getNodePoolStatus,
   filterNodePoolByQuery,
   getSelectableNodePoolNodes,
+  mergeSelectedNodePoolOutbounds,
 } from "./nodePoolImport.js";
 
 describe("nodePoolImport utils", () => {
@@ -155,5 +156,39 @@ describe("nodePoolImport utils", () => {
       const selectable = getSelectableNodePoolNodes(nodes, outbounds);
       expect(selectable.map((n) => n.id)).toEqual([2, 3]);
     });
+  });
+
+  it("合并选中的新节点和更新节点，同时跳过未改变节点", () => {
+    const result = mergeSelectedNodePoolOutbounds({
+      outbounds: [{ tag: "existing", type: "vless", server: "1.1.1.1" }],
+      selectedIds: [1, 2, 3],
+      nodes: [
+        {
+          id: 1,
+          tag: "existing",
+          raw_json: '{"type":"vless","server":"1.1.1.1"}',
+        },
+        {
+          id: 2,
+          tag: "existing",
+          raw_json: '{"type":"vless","server":"2.2.2.2"}',
+        },
+        {
+          id: 3,
+          tag: "new-node",
+          raw_json: '{"type":"trojan","server":"3.3.3.3"}',
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      importedCount: 1,
+      updatedCount: 1,
+      skippedCount: 1,
+    });
+    expect(result.outbounds).toEqual([
+      { tag: "existing", type: "vless", server: "2.2.2.2" },
+      { tag: "new-node", type: "trojan", server: "3.3.3.3" },
+    ]);
   });
 });

@@ -1350,9 +1350,13 @@ const loadNodes = async () => {
 const syncSubscriptions = async () => {
   isSyncingSubs.value = true;
   try {
-    const res = await fetch(`${API_BASE}/api/subscriptions/fetch-all`, {
+    const res = await fetch(`${API_BASE}/api/subscriptions/fetch`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token.value}` },
+      headers: {
+        Authorization: `Bearer ${token.value}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
     });
     if (res.ok) {
       showToast("所有订阅源节点已成功同步更新！");

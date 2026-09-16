@@ -1,0 +1,71 @@
+// @vitest-environment jsdom
+import { describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
+import { reactive } from "vue";
+import ConfigItemEditorModal from "./ConfigItemEditorModal.vue";
+
+const createItemModal = () =>
+  reactive({
+    show: true,
+    title: "编辑 DNS 服务器",
+    mode: "visual",
+    itemType: "dns_server",
+    itemData: {
+      tag: "local",
+      type: "local",
+      server: "",
+      detour: "",
+      client_subnet: "",
+      inet4_range: "",
+      inet6_range: "",
+    },
+    tempFields: {},
+    routeRuleLogic: "or",
+    jsonText: "",
+    error: "",
+    validating: false,
+  });
+
+describe("ConfigItemEditorModal", () => {
+  const mountModal = () =>
+    mount(ConfigItemEditorModal, {
+      props: {
+        itemModal: createItemModal(),
+        configData: { dns: { servers: [] } },
+        allOutboundTags: ["direct"],
+        browserPresets: [],
+        isLinux: true,
+        isApplePlatform: false,
+        isWindowsPlatform: false,
+        processNamePlaceholder: "进程名",
+        processPathPlaceholder: "进程路径",
+        presetUrlSelectConfig: "http://cp.cloudflare.com/generate_204",
+        getAddressPlaceholder: () => "服务器地址",
+      },
+    });
+
+  it("renders the modal and emits mode changes", async () => {
+    const wrapper = mountModal();
+
+    expect(wrapper.text()).toContain("编辑 DNS 服务器");
+    const jsonButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "JSON 源码");
+    await jsonButton.trigger("click");
+
+    expect(wrapper.emitted("set-mode")).toEqual([["json"]]);
+  });
+
+  it("emits close and save actions", async () => {
+    const wrapper = mountModal();
+
+    await wrapper.get(".modal-header svg").trigger("click");
+    expect(wrapper.emitted("close")).toHaveLength(1);
+
+    const saveButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("保存"));
+    await saveButton.trigger("click");
+    expect(wrapper.emitted("save")).toHaveLength(1);
+  });
+});

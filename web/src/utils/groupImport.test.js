@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   filterGroupsByQuery,
+  getAvailableGroups,
+  getGroupNodeCount,
+  formatGroupNodesDisplay,
+  getSelectableGroups,
+  areAllGroupsSelected,
+  buildGroupImportResult,
+  toggleGroupSelection,
+  invertGroupSelection,
   isGroupImported,
   clearSearchQuery,
 } from "./groupImport.js";
@@ -337,5 +345,79 @@ describe("清空按钮交互流程（模拟）", () => {
     // 5. 列表仍显示 cf_tunnel（用于灰显"已添加"状态）
     filtered = filterGroupsByQuery(state.groups, state.searchQuery);
     expect(filtered.map((g) => g.tag)).toEqual(["cf_tunnel"]);
+  });
+
+  it("计算可用组、全选状态并支持全选/反选", () => {
+    const outbounds = [{ tag: "cf_tunnel", type: "urltest" }];
+    const available = getAvailableGroups(sampleGroups, outbounds);
+    const selectable = getSelectableGroups(sampleGroups, outbounds);
+
+    expect(available.map((group) => group.tag)).not.toContain("cf_tunnel");
+    expect(selectable.map((group) => group.tag)).not.toContain("cf_tunnel");
+    expect(areAllGroupsSelected(selectable, ["proxy"])).toBe(false);
+    expect(toggleGroupSelection(["keep"], ["proxy", "AUTO-Test"], false)).toEqual([
+      "keep",
+      "proxy",
+      "AUTO-Test",
+    ]);
+    expect(toggleGroupSelection(["proxy"], ["proxy"], true)).toEqual([]);
+    expect(invertGroupSelection(["proxy"], ["proxy", "AUTO-Test"])).toEqual([
+      "AUTO-Test",
+    ]);
+  });
+
+  it("安全解析策略组节点数量", () => {
+    expect(getGroupNodeCount({ static_nodes: '["a", "b"]' })).toBe(2);
+    expect(getGroupNodeCount({ static_nodes: "invalid" })).toBe(0);
+    expect(getGroupNodeCount({ static_nodes: ["a"] })).toBe(1);
+  });
+
+  it("格式化策略组节点展示文本", () => {
+    expect(
+      formatGroupNodesDisplay({ static_nodes: '["a", "b", "c", "d"]' }),
+    ).toBe("a, b, c... (+1)");
+    expect(formatGroupNodesDisplay({ static_nodes: "invalid" })).toBe("解析错误");
+    expect(formatGroupNodesDisplay({ static_nodes: [] })).toBe("");
+  });
+
+  it("将策略组和缺失节点作为新数组导入，且不会修改原列表", () => {
+    const outbounds = [{ type: "direct", tag: "direct" }];
+    const result = buildGroupImportResult({
+      group: {
+        tag: "auto",
+        group_type: "urltest",
+        static_nodes: '["node-a", "node-b"]',
+        url: "https://example.com/test",
+      },
+      nodePool: [
+        {
+          tag: "node-a",
+          raw_json: '{"type":"vless","server":"1.1.1.1","server_port":443}',
+        },
+        { tag: "node-b", raw_json: "invalid" },
+      ],
+      outbounds,
+      sanitizeFn: (item) => item,
+    });
+
+    expect(result).toMatchObject({ imported: true, addedNodeCount: 1 });
+    expect(result.outbounds).toEqual([
+      { type: "direct", tag: "direct" },
+      {
+        type: "vless",
+        tag: "node-a",
+        server: "1.1.1.1",
+        server_port: 443,
+      },
+      {
+        type: "urltest",
+        tag: "auto",
+        outbounds: ["node-a", "node-b"],
+        url: "https://example.com/test",
+        interval: "3m",
+        tolerance: 50,
+      },
+    ]);
+    expect(outbounds).toEqual([{ type: "direct", tag: "direct" }]);
   });
 });

@@ -12,23 +12,12 @@ export const stats = ref({ subs: 0, nodes: 0, groups: 0 });
 export const subscriptions = ref([]);
 export const groups = ref([]);
 
-// Sudo password persisted in localStorage for seamless one-time setup
-export const sessionSudoPassword = ref(
-  typeof localStorage !== "undefined"
-    ? localStorage.getItem("subout_sudo_pass") || ""
-    : "",
-);
+// Sudo password is intentionally kept only in memory for the current page session.
+export const sessionSudoPassword = ref("");
 
 export function setSessionSudoPassword(pass) {
   const p = typeof pass === "string" ? pass.trim() : "";
   sessionSudoPassword.value = p;
-  if (typeof localStorage !== "undefined") {
-    if (p) {
-      localStorage.setItem("subout_sudo_pass", p);
-    } else {
-      localStorage.removeItem("subout_sudo_pass");
-    }
-  }
 }
 
 // App Mode State: "simple" | "expert"
