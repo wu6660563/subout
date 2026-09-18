@@ -595,6 +595,7 @@ pub fn generate_simple_singbox_config(conn: &Connection, cfg: &SimpleConfig) -> 
 
     let route_val = json!({
         "auto_detect_interface": true,
+        "find_process": cfg.inbound.inbound_type == "tun",
         "default_domain_resolver": "dns_local",
         "rules": route_rules,
         "rule_set": rule_sets,

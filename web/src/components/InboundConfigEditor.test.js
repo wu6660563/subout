@@ -32,4 +32,31 @@ describe("InboundConfigEditor", () => {
     await wrapper.findAll("button").find((button) => button.text() === "编辑").trigger("click");
     expect(wrapper.emitted("edit-item")).toEqual([[configData.inbounds[0], 0]]);
   });
+
+  it("keeps TUN bypass separators while typing and normalizes them on blur", async () => {
+    const configData = reactive({
+      inbounds: [{ tag: "tun-in", type: "tun", route_exclude_address: [] }],
+    });
+    const wrapper = mount(InboundConfigEditor, {
+      props: {
+        configData,
+        isLinux: false,
+        isApplePlatform: false,
+        isWindowsPlatform: true,
+      },
+    });
+
+    const textarea = wrapper.find("textarea");
+    textarea.element.value = [" 10.16.228.100/32 ", "10.16.0.0/12, "].join("\n");
+    await textarea.trigger("input");
+
+    expect(textarea.element.value).toBe(" 10.16.228.100/32 \n10.16.0.0/12, ");
+
+    await textarea.trigger("blur");
+
+    expect(configData.inbounds[0].route_exclude_address).toEqual([
+      "10.16.228.100/32",
+      "10.16.0.0/12",
+    ]);
+  });
 });

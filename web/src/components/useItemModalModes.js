@@ -76,6 +76,7 @@ const syncVisualToItemData = () => {
       delete itemModal.itemData.strict_route;
       delete itemModal.itemData.mtu;
       delete itemModal.itemData.auto_redirect;
+      delete itemModal.itemData.route_exclude_address;
     }
   }
   if (itemModal.itemType === "route_ruleset") {
@@ -83,7 +84,6 @@ const syncVisualToItemData = () => {
       delete itemModal.itemData.url;
       delete itemModal.itemData.download_detour;
       delete itemModal.itemData.update_interval;
-      delete itemModal.itemData.format;
     } else {
       delete itemModal.itemData.path;
     }

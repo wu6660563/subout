@@ -190,6 +190,17 @@
             </svg>
             <span class="sidebar-text">核心日志</span>
           </a>
+          <a
+            class="menu-item"
+            :class="{ active: currentView === 'connectionAudit' }"
+            href="#connectionAudit"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V20h-2v-.08a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.4 15a1.7 1.7 0 0 0-1.56-1.03H7v-2h.84A1.7 1.7 0 0 0 9.4 11a1.7 1.7 0 0 0-.34-1.88L9 9.06l1.42-1.42.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 13.39 6.5V6h2v.5a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.78 9l-.06.06A1.7 1.7 0 0 0 19.4 11c.25.6.83 1 1.48 1H21v2h-.12A1.7 1.7 0 0 0 19.4 15Z" />
+            </svg>
+            <span class="sidebar-text">连接审计</span>
+          </a>
         </template>
 
         <!-- Expert Mode exclusive views -->
@@ -261,6 +272,18 @@
               <line x1="16" y1="17" x2="8" y2="17"></line>
             </svg>
             <span class="sidebar-text">核心日志</span>
+          </a>
+          <a
+            class="menu-item"
+            :class="{ active: currentView === 'connectionAudit' }"
+            href="#connectionAudit"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M5 12h-3M22 12h-3M12 5V2M12 22v-3" />
+              <circle cx="12" cy="12" r="8" />
+            </svg>
+            <span class="sidebar-text">连接审计</span>
           </a>
         </template>
 
@@ -485,6 +508,7 @@
       <NodesView v-else-if="currentView === 'nodes'" />
       <SimpleConfigView v-else-if="currentView === 'simpleConfig'" />
       <ServiceLogsView v-else-if="currentView === 'serviceLogs'" />
+      <ConnectionAuditView v-else-if="currentView === 'connectionAudit'" />
       <GroupsView v-else-if="currentView === 'groups'" />
       <ConfigEditorView v-else-if="currentView === 'configs'" />
       <SiteTestView v-else-if="currentView === 'siteTest'" :token="token" />
@@ -617,6 +641,7 @@ import ConfigEditorView from "./components/ConfigEditorView.vue";
 import SiteTestView from "./components/SiteTestView.vue";
 import SimpleConfigView from "./components/SimpleConfigView.vue";
 import ServiceLogsView from "./components/ServiceLogsView.vue";
+import ConnectionAuditView from "./components/ConnectionAuditView.vue";
 import ModeSelectModal from "./components/ModeSelectModal.vue";
 import HelpView from "./components/HelpView.vue";
 
@@ -777,6 +802,7 @@ const validViews = [
   "configs",
   "simpleConfig",
   "serviceLogs",
+  "connectionAudit",
   "siteTest",
   "help",
   "settings",

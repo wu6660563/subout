@@ -19,7 +19,7 @@ describe("ExperimentalConfigEditor", () => {
           external_controller: "",
           secret: "",
           external_ui: "",
-          default_mode: "rule",
+          default_mode: "Rule",
         },
       },
     });
@@ -39,5 +39,10 @@ describe("ExperimentalConfigEditor", () => {
     expect(configData.experimental.clash_api.external_controller).toBe(
       "127.0.0.1:9090",
     );
+
+    const modeSelect = wrapper.find("select");
+    expect(modeSelect.find("option:checked").text()).toContain("推荐");
+    await modeSelect.setValue("Global");
+    expect(configData.experimental.clash_api.default_mode).toBe("Global");
   });
 });

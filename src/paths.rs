@@ -189,6 +189,19 @@ impl AppPaths {
         Ok(())
     }
 
+    /// Resolve the data directory to the absolute path used by sing-box.
+    pub fn absolute_data_dir(&self) -> PathBuf {
+        std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| {
+            if self.data_dir.is_absolute() {
+                self.data_dir.clone()
+            } else if let Ok(cwd) = std::env::current_dir() {
+                cwd.join(&self.data_dir)
+            } else {
+                self.data_dir.clone()
+            }
+        })
+    }
+
     /// Path to SQLite database file
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("subout.db")
@@ -602,6 +615,24 @@ mod tests {
         assert!(t1.to_string_lossy().ends_with(".json"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_absolute_data_dir_resolves_relative_path() {
+        let paths = AppPaths {
+            config_dir: PathBuf::from("."),
+            data_dir: PathBuf::from("."),
+            log_dir: PathBuf::from("."),
+            runtime_dir: PathBuf::from("."),
+            custom_singbox_path: None,
+            is_portable: false,
+            is_dev: true,
+        };
+
+        assert_eq!(
+            paths.absolute_data_dir(),
+            std::fs::canonicalize(".").unwrap()
+        );
     }
 
     #[test]

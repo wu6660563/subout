@@ -174,6 +174,30 @@
                                     >
                                   </label>
                                 </div>
+                                <div style="display: flex; gap: 0.5rem; align-items: flex-start">
+                                  <span
+                                    style="
+                                      width: 60px;
+                                      color: var(--text-muted);
+                                      flex-shrink: 0;
+                                      text-align: right;
+                                      padding-top: 0.35rem;
+                                    "
+                                    >绕过地址:</span
+                                  >
+                                  <div style="flex: 1; min-width: 0">
+                                    <textarea
+                                      :value="Array.isArray(inb.route_exclude_address) ? inb.route_exclude_address.join('\n') : ''"
+                                      class="input-control table-input"
+                                      style="width: 100%; min-height: 54px; resize: vertical"
+                                      placeholder="10.16.228.100/32&#10;每行或逗号分隔一个 CIDR"
+                                      @blur="inb.route_exclude_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                                    ></textarea>
+                                    <small style="color: var(--text-muted)">
+                                      route_exclude_address：匹配的目标不进入 TUN，由原进程直接连接。
+                                    </small>
+                                  </div>
+                                </div>
                               </div>
                               <!-- Regular socket inbounds -->
                               <div

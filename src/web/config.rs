@@ -492,12 +492,17 @@ pub async fn validate_full_config(
             command_missing: false,
         }));
     }
+    let abs_temp_file_path =
+        std::fs::canonicalize(&temp_file_path).unwrap_or_else(|_| temp_file_path.clone());
 
     let singbox_bin = crate::kernel::get_singbox_executable()
         .unwrap_or_else(|| std::path::PathBuf::from("sing-box"));
 
     let output_res = std::process::Command::new(&singbox_bin)
-        .args(["check", "-c", &temp_file_path.to_string_lossy()])
+        .arg("-D")
+        .arg(crate::paths::AppPaths::get().absolute_data_dir())
+        .args(["check", "-c"])
+        .arg(&abs_temp_file_path)
         .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
         .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
         .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")
@@ -582,12 +587,17 @@ pub fn validate_config_with_singbox(
     if let Err(e) = std::fs::write(&temp_file_path, config_str) {
         return Err(format!("写入临时文件失败: {}", e));
     }
+    let abs_temp_file_path =
+        std::fs::canonicalize(&temp_file_path).unwrap_or_else(|_| temp_file_path.clone());
 
     let singbox_bin = crate::kernel::get_singbox_executable()
         .unwrap_or_else(|| std::path::PathBuf::from("sing-box"));
 
     let output_res = std::process::Command::new(&singbox_bin)
-        .args(["check", "-c", &temp_file_path.to_string_lossy()])
+        .arg("-D")
+        .arg(crate::paths::AppPaths::get().absolute_data_dir())
+        .args(["check", "-c"])
+        .arg(&abs_temp_file_path)
         .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
         .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
         .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")

@@ -32,7 +32,7 @@ export const useConfigEditorState = ({ isLinux, showToast, sanitizeOutboundItem 
     route: { final: "direct", auto_detect_interface: true, default_domain_resolver: "", rules: [], rule_set: [] },
     experimental: {
       cache_file: { enabled: false, path: "", store_fakeip: false, store_rdrc: false },
-      clash_api: { enabled: false, external_controller: "", external_ui: "", secret: "", default_mode: "" },
+      clash_api: { enabled: false, external_controller: "", external_ui: "", secret: "", default_mode: "Rule" },
     },
   });
 

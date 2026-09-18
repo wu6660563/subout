@@ -327,6 +327,23 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             "/api/service/logs/clear",
             post(service_api::clear_service_logs),
         )
+        .route(
+            "/api/service/audit",
+            get(service_api::get_service_audit).delete(service_api::clear_service_audit),
+        )
+        .route(
+            "/api/service/audit/clear",
+            post(service_api::clear_service_audit),
+        )
+        .route(
+            "/api/service/audit/export",
+            get(service_api::export_service_audit),
+        )
+        .route(
+            "/api/service/audit/settings",
+            get(service_api::get_service_audit_settings)
+                .put(service_api::save_service_audit_settings),
+        )
         // Simple Mode Configuration APIs
         .route(
             "/api/simple-config",

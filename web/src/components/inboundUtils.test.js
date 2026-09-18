@@ -43,6 +43,28 @@ describe("inboundUtils", () => {
     ).not.toHaveProperty("auto_redirect");
   });
 
+  it("normalizes TUN route exclusion CIDRs and removes them from socket inbounds", () => {
+    expect(
+      normalizeInboundForType(
+        {
+          type: "tun",
+          address: ["172.19.0.1/30"],
+          route_exclude_address: [" 10.16.228.100/32 ", "", "10.16.0.0/12"],
+        },
+        { isLinux: false, isApplePlatform: false, isWindowsPlatform: true },
+      ),
+    ).toMatchObject({
+      route_exclude_address: ["10.16.228.100/32", "10.16.0.0/12"],
+    });
+
+    expect(
+      normalizeInboundForType(
+        { type: "http", route_exclude_address: ["10.16.228.100/32"] },
+        { isLinux: true, isApplePlatform: false, isWindowsPlatform: false },
+      ),
+    ).not.toHaveProperty("route_exclude_address");
+  });
+
   it("applies listen defaults for non-tun inbounds", () => {
     expect(
       normalizeInboundForType(

@@ -611,6 +611,19 @@
                     172.19.0.1/30、fd00::1/126。
                   </small>
                 </div>
+                <div class="input-group" style="margin-bottom: 1rem">
+                  <label>绕过 TUN 的目标地址 (route_exclude_address)</label>
+                  <textarea
+                    :value="Array.isArray(itemModal.itemData.route_exclude_address) ? itemModal.itemData.route_exclude_address.join('\n') : ''"
+                    class="input-control"
+                    style="min-height: 88px; resize: vertical"
+                    placeholder="10.16.228.100/32&#10;每行或逗号分隔一个 CIDR"
+                    @blur="itemModal.itemData.route_exclude_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                  ></textarea>
+                  <small style="color: var(--text-muted)">
+                    匹配的流量不进入 TUN，保留原进程网络身份；建议先填写精确地址或最小网段。
+                  </small>
+                </div>
                 <div class="grid-2">
                   <div class="input-group">
                     <label>网卡接口名称 (interface_name)</label>

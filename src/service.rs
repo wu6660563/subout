@@ -1,17 +1,29 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::task::JoinHandle;
 
+use crate::audit::{
+    AuditEvent, ConnectionAuditStore, ResolvedOutbound, RouteKind, expand_outbound_chain,
+    parse_connection_line,
+};
 use crate::kernel;
 
 const MAX_LOG_LINES: usize = 1000;
+const AUDIT_QUEUE_CAPACITY: usize = 4096;
+const AUDIT_OUTBOUND_CACHE_TTL: Duration = Duration::from_secs(2);
+const AUDIT_DUPLICATE_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SingboxLogLevel {
@@ -157,6 +169,169 @@ pub async fn append_to_file(path: &Path, line: &str) {
     }
 }
 
+async fn ingest_audit_line(
+    audit: Arc<RwLock<ConnectionAuditStore>>,
+    clash_api: Arc<RwLock<Option<ClashApiConfig>>>,
+    node_subscription_labels: Arc<RwLock<HashMap<String, String>>>,
+    outbound_cache: Arc<RwLock<Option<AuditOutboundCache>>>,
+    generation: Arc<AtomicU64>,
+    line_generation: u64,
+    line: &str,
+) {
+    if generation.load(Ordering::Acquire) != line_generation {
+        return;
+    }
+    if !audit.read().await.is_enabled() {
+        return;
+    }
+    let Some(parsed) = parse_connection_line(line) else {
+        let mut audit = audit.write().await;
+        if generation.load(Ordering::Acquire) == line_generation {
+            audit.ingest_line(line, None);
+        }
+        return;
+    };
+    if parsed.route_kind == RouteKind::Direct {
+        return;
+    }
+    let resolved = if parsed.route_kind == RouteKind::Proxy {
+        if let Some(tag) = parsed.outbound_tag.as_deref() {
+            let labels = node_subscription_labels.read().await.clone();
+            resolve_runtime_outbound(clash_api.read().await.clone(), tag, &labels, outbound_cache)
+                .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut audit = audit.write().await;
+    if generation.load(Ordering::Acquire) == line_generation {
+        audit.ingest_line(line, resolved.as_ref());
+    }
+}
+
+#[derive(Debug)]
+struct AuditQueueLine {
+    generation: u64,
+    line: String,
+}
+
+fn enqueue_audit_line(
+    sender: &mpsc::Sender<AuditQueueLine>,
+    generation: &AtomicU64,
+    dropped: &AtomicU64,
+    line: &str,
+) {
+    match sender.try_send(AuditQueueLine {
+        generation: generation.load(Ordering::Acquire),
+        line: line.to_string(),
+    }) {
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+struct AuditLineDeduplicator {
+    recent_lines: HashMap<String, Instant>,
+    last_pruned: Instant,
+}
+
+impl AuditLineDeduplicator {
+    fn new() -> Self {
+        Self {
+            recent_lines: HashMap::new(),
+            last_pruned: Instant::now(),
+        }
+    }
+
+    fn should_ingest(&mut self, line: &str) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.last_pruned) >= AUDIT_DUPLICATE_WINDOW {
+            self.recent_lines
+                .retain(|_, seen_at| now.duration_since(*seen_at) < AUDIT_DUPLICATE_WINDOW);
+            self.last_pruned = now;
+        }
+        if self
+            .recent_lines
+            .get(line)
+            .is_some_and(|seen_at| now.duration_since(*seen_at) < AUDIT_DUPLICATE_WINDOW)
+        {
+            return false;
+        }
+        self.recent_lines.insert(line.to_string(), now);
+        true
+    }
+}
+
+async fn resolve_runtime_outbound(
+    config: Option<ClashApiConfig>,
+    outbound_tag: &str,
+    node_subscription_labels: &HashMap<String, String>,
+    cache: Arc<RwLock<Option<AuditOutboundCache>>>,
+) -> Option<ResolvedOutbound> {
+    let config = config?;
+    let response = cached_audit_proxies(&cache, &config).await;
+    let response = match response {
+        Some(response) => response,
+        None => {
+            let response = Arc::new(
+                reqwest::Client::new()
+                    .get(format!("{}/proxies", config.base_url.trim_end_matches('/')))
+                    .bearer_auth(&config.secret)
+                    .timeout(Duration::from_millis(500))
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json::<Value>()
+                    .await
+                    .ok()?,
+            );
+            *cache.write().await = Some(AuditOutboundCache {
+                base_url: config.base_url.clone(),
+                fetched_at: Instant::now(),
+                response: response.clone(),
+            });
+            response
+        }
+    };
+    let mut resolved = expand_outbound_chain(&response, outbound_tag);
+    decorate_final_node_with_subscription(&mut resolved, node_subscription_labels);
+    Some(resolved)
+}
+
+async fn cached_audit_proxies(
+    cache: &RwLock<Option<AuditOutboundCache>>,
+    config: &ClashApiConfig,
+) -> Option<Arc<Value>> {
+    cache
+        .read()
+        .await
+        .as_ref()
+        .filter(|entry| {
+            entry.base_url == config.base_url
+                && entry.fetched_at.elapsed() < AUDIT_OUTBOUND_CACHE_TTL
+        })
+        .map(|entry| entry.response.clone())
+}
+
+fn decorate_final_node_with_subscription(
+    resolved: &mut ResolvedOutbound,
+    node_subscription_labels: &HashMap<String, String>,
+) {
+    let Some(node) = resolved.final_node.as_ref() else {
+        return;
+    };
+    let Some(subscription) = node_subscription_labels.get(node) else {
+        return;
+    };
+    resolved.final_node = Some(format!("{subscription}/{node}"));
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct ConflictingProcessInfo {
     pub pid: u32,
@@ -201,6 +376,16 @@ pub struct SingBoxServiceManager {
     current_log_level: Arc<RwLock<String>>,
     current_log_disabled: Arc<RwLock<bool>>,
     current_log_output: Arc<RwLock<Option<String>>>,
+    audit: Arc<RwLock<ConnectionAuditStore>>,
+    audit_recording_enabled: Arc<RwLock<bool>>,
+    audit_tun_active: Arc<RwLock<bool>>,
+    clash_api: Arc<RwLock<Option<ClashApiConfig>>>,
+    node_subscription_labels: Arc<RwLock<HashMap<String, String>>>,
+    audit_outbound_cache: Arc<RwLock<Option<AuditOutboundCache>>>,
+    audit_queue: Arc<RwLock<Option<mpsc::Sender<AuditQueueLine>>>>,
+    audit_queue_dropped: Arc<AtomicU64>,
+    audit_queue_generation: Arc<AtomicU64>,
+    audit_worker: Arc<Mutex<Option<JoinHandle<()>>>>,
     conflict_cache: Arc<RwLock<Option<ConflictCache>>>,
 }
 
@@ -211,6 +396,19 @@ struct ConflictCache {
     processes: Vec<ConflictingProcessInfo>,
 }
 
+#[derive(Clone, Debug)]
+struct ClashApiConfig {
+    base_url: String,
+    secret: String,
+}
+
+#[derive(Clone)]
+struct AuditOutboundCache {
+    base_url: String,
+    fetched_at: Instant,
+    response: Arc<Value>,
+}
+
 impl Default for SingBoxServiceManager {
     fn default() -> Self {
         Self::new()
@@ -219,6 +417,8 @@ impl Default for SingBoxServiceManager {
 
 impl SingBoxServiceManager {
     pub fn new() -> Self {
+        let mut audit_store = ConnectionAuditStore::new();
+        audit_store.set_enabled(false);
         Self {
             child: Arc::new(RwLock::new(None)),
             managed_pid: Arc::new(RwLock::new(None)),
@@ -231,12 +431,63 @@ impl SingBoxServiceManager {
             current_log_level: Arc::new(RwLock::new("info".to_string())),
             current_log_disabled: Arc::new(RwLock::new(false)),
             current_log_output: Arc::new(RwLock::new(None)),
+            audit: Arc::new(RwLock::new(audit_store)),
+            audit_recording_enabled: Arc::new(RwLock::new(true)),
+            audit_tun_active: Arc::new(RwLock::new(false)),
+            clash_api: Arc::new(RwLock::new(None)),
+            node_subscription_labels: Arc::new(RwLock::new(HashMap::new())),
+            audit_outbound_cache: Arc::new(RwLock::new(None)),
+            audit_queue: Arc::new(RwLock::new(None)),
+            audit_queue_dropped: Arc::new(AtomicU64::new(0)),
+            audit_queue_generation: Arc::new(AtomicU64::new(0)),
+            audit_worker: Arc::new(Mutex::new(None)),
             conflict_cache: Arc::new(RwLock::new(None)),
         }
     }
 
     pub async fn set_db_path(&self, db_path: &str) {
         *self.db_path.write().await = Some(db_path.to_string());
+        if let Ok(conn) = rusqlite::Connection::open(db_path) {
+            if let Ok(Some(value)) =
+                crate::db::get_setting(&conn, "connection_audit_retention_minutes")
+                && let Ok(minutes) = value.parse::<u64>()
+            {
+                self.audit.write().await.set_retention_minutes(minutes);
+            }
+            if let Ok(Some(value)) =
+                crate::db::get_setting(&conn, "connection_audit_recording_enabled")
+                && let Ok(enabled) = value.parse::<bool>()
+            {
+                *self.audit_recording_enabled.write().await = enabled;
+            }
+        }
+        self.refresh_audit_node_subscription_labels().await;
+        self.sync_audit_recording_state().await;
+    }
+
+    async fn refresh_audit_node_subscription_labels(&self) {
+        let Some(db_path) = self.db_path.read().await.clone() else {
+            self.node_subscription_labels.write().await.clear();
+            return;
+        };
+        let mut labels = HashMap::new();
+        let mut duplicate_tags = HashSet::new();
+        if let Ok(conn) = rusqlite::Connection::open(db_path)
+            && let Ok(nodes) = crate::db::get_nodes(&conn)
+        {
+            for node in nodes {
+                let Some(label) = node.subscription_label else {
+                    continue;
+                };
+                if labels.insert(node.tag.clone(), label).is_some() {
+                    duplicate_tags.insert(node.tag);
+                }
+            }
+        }
+        for tag in duplicate_tags {
+            labels.remove(&tag);
+        }
+        *self.node_subscription_labels.write().await = labels;
     }
 
     pub async fn load_saved_sudo_pass(&self) {
@@ -311,6 +562,16 @@ impl SingBoxServiceManager {
             }
             logs.push_back(formatted.clone());
         }
+        if let Some(sender) = self.audit_queue.read().await.clone() {
+            enqueue_audit_line(
+                &sender,
+                &self.audit_queue_generation,
+                &self.audit_queue_dropped,
+                line,
+            );
+        } else {
+            self.audit.write().await.ingest_line(line, None);
+        }
         let log_file = crate::paths::AppPaths::get().log_dir.join("subout.log");
         append_to_file(&log_file, &formatted).await;
     }
@@ -325,6 +586,88 @@ impl SingBoxServiceManager {
         logs.clear();
         let log_file = crate::paths::AppPaths::get().log_dir.join("subout.log");
         let _ = tokio::fs::remove_file(log_file).await;
+    }
+
+    pub async fn get_audit_snapshot(&self) -> Vec<AuditEvent> {
+        self.get_audit_records().await.0
+    }
+
+    pub async fn get_audit_history(&self) -> Vec<AuditEvent> {
+        self.get_audit_records().await.1
+    }
+
+    pub async fn get_audit_records(&self) -> (Vec<AuditEvent>, Vec<AuditEvent>) {
+        let running = self.get_managed_pid().await.is_some();
+        let mut audit = self.audit.write().await;
+        if running {
+            let platform = crate::platform::current_platform();
+            audit.prune_dead_processes(|pid| platform.is_pid_alive(pid));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        let current = audit.snapshot_at(now);
+        let events = audit.history_at(now);
+        (current, events)
+    }
+
+    pub async fn clear_audit(&self) {
+        self.audit_queue_generation.fetch_add(1, Ordering::AcqRel);
+        self.audit.write().await.clear();
+        self.audit_queue_dropped.store(0, Ordering::Relaxed);
+    }
+
+    pub async fn audit_retention_minutes(&self) -> u64 {
+        self.audit.read().await.retention_minutes()
+    }
+
+    pub fn audit_queue_dropped_lines(&self) -> u64 {
+        self.audit_queue_dropped.load(Ordering::Relaxed)
+    }
+
+    pub async fn audit_recording_enabled(&self) -> bool {
+        *self.audit_recording_enabled.read().await
+    }
+
+    pub async fn set_audit_recording_enabled(&self, enabled: bool) -> Result<bool> {
+        *self.audit_recording_enabled.write().await = enabled;
+        self.sync_audit_recording_state().await;
+        if let Some(path) = self.db_path.read().await.clone() {
+            let conn = rusqlite::Connection::open(path)?;
+            crate::db::update_setting(
+                &conn,
+                "connection_audit_recording_enabled",
+                &enabled.to_string(),
+            )?;
+        }
+        Ok(enabled)
+    }
+
+    pub async fn set_audit_retention_minutes(&self, minutes: u64) -> Result<u64> {
+        let normalized = self.audit.write().await.set_retention_minutes(minutes);
+        if let Some(path) = self.db_path.read().await.clone() {
+            let conn = rusqlite::Connection::open(path)?;
+            crate::db::update_setting(
+                &conn,
+                "connection_audit_retention_minutes",
+                &normalized.to_string(),
+            )?;
+        }
+        Ok(normalized)
+    }
+
+    async fn sync_audit_recording_state(&self) {
+        let enabled = *self.audit_recording_enabled.read().await;
+        let tun_active = *self.audit_tun_active.read().await;
+        self.audit.write().await.set_enabled(enabled && tun_active);
+    }
+
+    async fn stop_audit_worker(&self) {
+        *self.audit_queue.write().await = None;
+        if let Some(worker) = self.audit_worker.lock().await.take() {
+            worker.abort();
+        }
     }
 
     pub async fn is_running(&self) -> bool {
@@ -751,6 +1094,7 @@ impl SingBoxServiceManager {
         }
 
         let tun_mode = is_tun_mode(&final_config_json);
+        let clash_api_config = prepare_audit_runtime_config(&mut final_config_json, tun_mode);
         let as_root = is_running_as_root();
         let platform = crate::platform::current_platform();
 
@@ -816,16 +1160,7 @@ impl SingBoxServiceManager {
             .await;
         }
 
-        let data_dir = paths.data_dir.clone();
-        let abs_data_dir = std::fs::canonicalize(&data_dir).unwrap_or_else(|_| {
-            if data_dir.is_absolute() {
-                data_dir.clone()
-            } else if let Ok(cwd) = std::env::current_dir() {
-                cwd.join(&data_dir)
-            } else {
-                data_dir.clone()
-            }
-        });
+        let abs_data_dir = paths.absolute_data_dir();
 
         let abs_config_path = std::fs::canonicalize(&config_path).unwrap_or_else(|_| {
             if config_path.is_absolute() {
@@ -907,6 +1242,40 @@ impl SingBoxServiceManager {
         *self.current_log_output.write().await = log_output_file
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
+        *self.clash_api.write().await = clash_api_config;
+        *self.audit_outbound_cache.write().await = None;
+        *self.audit_tun_active.write().await = tun_mode;
+        self.refresh_audit_node_subscription_labels().await;
+        self.sync_audit_recording_state().await;
+
+        self.stop_audit_worker().await;
+        self.audit_queue_dropped.store(0, Ordering::Relaxed);
+        let (audit_sender, mut audit_receiver) = mpsc::channel(AUDIT_QUEUE_CAPACITY);
+        *self.audit_queue.write().await = Some(audit_sender.clone());
+        let audit_worker = self.audit.clone();
+        let clash_api_worker = self.clash_api.clone();
+        let node_subscription_labels_worker = self.node_subscription_labels.clone();
+        let audit_outbound_cache_worker = self.audit_outbound_cache.clone();
+        let audit_queue_generation_worker = self.audit_queue_generation.clone();
+        let worker = tokio::spawn(async move {
+            let mut line_deduplicator = AuditLineDeduplicator::new();
+            while let Some(queued_line) = audit_receiver.recv().await {
+                if !line_deduplicator.should_ingest(&queued_line.line) {
+                    continue;
+                }
+                ingest_audit_line(
+                    audit_worker.clone(),
+                    clash_api_worker.clone(),
+                    node_subscription_labels_worker.clone(),
+                    audit_outbound_cache_worker.clone(),
+                    audit_queue_generation_worker.clone(),
+                    queued_line.generation,
+                    &queued_line.line,
+                )
+                .await;
+            }
+        });
+        *self.audit_worker.lock().await = Some(worker);
 
         let min_level = configured_level;
         let is_disabled = log_disabled;
@@ -918,10 +1287,19 @@ impl SingBoxServiceManager {
             let last_error_clone = self.last_error.clone();
             let ready_clone = self.ready.clone();
             let subout_log_file = subout_log_path.clone();
+            let audit_sender = audit_sender.clone();
+            let audit_queue_dropped = self.audit_queue_dropped.clone();
+            let audit_queue_generation = self.audit_queue_generation.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let clean = strip_ansi_codes(&line);
+                    enqueue_audit_line(
+                        &audit_sender,
+                        &audit_queue_generation,
+                        &audit_queue_dropped,
+                        &clean,
+                    );
                     if is_actual_singbox_error(&clean) {
                         *last_error_clone.write().await = Some(clean.clone());
                     } else {
@@ -960,10 +1338,19 @@ impl SingBoxServiceManager {
             let last_error_clone = self.last_error.clone();
             let ready_clone = self.ready.clone();
             let subout_log_file = subout_log_path.clone();
+            let audit_sender = audit_sender.clone();
+            let audit_queue_dropped = self.audit_queue_dropped.clone();
+            let audit_queue_generation = self.audit_queue_generation.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let clean = strip_ansi_codes(&line);
+                    enqueue_audit_line(
+                        &audit_sender,
+                        &audit_queue_generation,
+                        &audit_queue_dropped,
+                        &clean,
+                    );
                     if is_actual_singbox_error(&clean) {
                         *last_error_clone.write().await = Some(clean.clone());
                     } else {
@@ -1003,6 +1390,9 @@ impl SingBoxServiceManager {
             let ready_clone = self.ready.clone();
             let is_running_child = self.child.clone();
             let subout_log_file = subout_log_path.clone();
+            let audit_sender = audit_sender.clone();
+            let audit_queue_dropped = self.audit_queue_dropped.clone();
+            let audit_queue_generation = self.audit_queue_generation.clone();
             tokio::spawn(async move {
                 // Wait up to 5s for sing-box to create the log file
                 let mut file = None;
@@ -1037,6 +1427,12 @@ impl SingBoxServiceManager {
                                     let trimmed = line_buf.trim_end_matches(&['\r', '\n'][..]);
                                     if !trimmed.is_empty() {
                                         let clean = strip_ansi_codes(trimmed);
+                                        enqueue_audit_line(
+                                            &audit_sender,
+                                            &audit_queue_generation,
+                                            &audit_queue_dropped,
+                                            &clean,
+                                        );
                                         if is_actual_singbox_error(&clean) {
                                             *last_error_clone.write().await = Some(clean.clone());
                                         } else {
@@ -1219,6 +1615,7 @@ impl SingBoxServiceManager {
         // child lock while taskkill/PowerShell runs used to make concurrent
         // status requests queue behind stop/restart and occasionally render a
         // stale state after a page refresh.
+        self.stop_audit_worker().await;
         let child_opt = self.child.write().await.take();
         let mut had_child = false;
         let mut pid_opt = *self.managed_pid.read().await;
@@ -1298,6 +1695,10 @@ impl SingBoxServiceManager {
         *self.started_at.write().await = None;
         *self.ready.write().await = false;
         *self.last_error.write().await = None;
+        *self.clash_api.write().await = None;
+        *self.audit_outbound_cache.write().await = None;
+        *self.audit_tun_active.write().await = false;
+        self.sync_audit_recording_state().await;
         Ok(())
     }
 
@@ -1401,6 +1802,90 @@ pub fn is_tun_mode(config_json: &Value) -> bool {
     false
 }
 
+fn prepare_audit_runtime_config(config: &mut Value, tun_mode: bool) -> Option<ClashApiConfig> {
+    if !tun_mode {
+        return None;
+    }
+
+    if let Some(route) = config.get_mut("route").and_then(Value::as_object_mut) {
+        route.insert("find_process".to_string(), serde_json::json!(true));
+    } else {
+        config["route"] = serde_json::json!({"find_process": true});
+    }
+
+    if !config.get("experimental").is_some_and(Value::is_object) {
+        config["experimental"] = serde_json::json!({});
+    }
+    let experimental = config
+        .get_mut("experimental")
+        .and_then(Value::as_object_mut)
+        .expect("experimental object inserted");
+    if experimental
+        .get("clash_api")
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        return None;
+    }
+    let clash_api = experimental
+        .entry("clash_api")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()?;
+
+    let existing_controller = clash_api
+        .get("external_controller")
+        .and_then(Value::as_str)
+        .and_then(parse_loopback_controller);
+    let (host, port) = match existing_controller {
+        Some(controller) => controller,
+        None => {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+            let port = listener.local_addr().ok()?.port();
+            drop(listener);
+            ("127.0.0.1".to_string(), port)
+        }
+    };
+    let secret = clash_api
+        .get("secret")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(generate_local_api_secret);
+    clash_api.insert(
+        "external_controller".to_string(),
+        serde_json::json!(format!("{}:{}", host, port)),
+    );
+    clash_api.insert("secret".to_string(), serde_json::json!(secret.clone()));
+
+    Some(ClashApiConfig {
+        base_url: format!("http://{}:{}", host, port),
+        secret,
+    })
+}
+
+fn parse_loopback_controller(value: &str) -> Option<(String, u16)> {
+    let (host, port) = value.rsplit_once(':')?;
+    let host = host.trim().trim_matches(['[', ']']);
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    Some(("127.0.0.1".to_string(), port.parse().ok()?))
+}
+
+fn generate_local_api_secret() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
+}
+
 fn windows_tun_requires_elevation(is_windows: bool, tun_mode: bool, is_elevated: bool) -> bool {
     is_windows && tun_mode && !is_elevated
 }
@@ -1417,9 +1902,14 @@ fn validate_runtime_config(singbox_bin: &Path, config: &Value) -> Result<(), Str
 
     std::fs::write(&temp_file_path, config_str)
         .map_err(|err| format!("启动前写入配置校验文件失败: {}", err))?;
+    let abs_temp_file_path =
+        std::fs::canonicalize(&temp_file_path).unwrap_or_else(|_| temp_file_path.clone());
 
     let output = std::process::Command::new(singbox_bin)
-        .args(["check", "-c", &temp_file_path.to_string_lossy()])
+        .arg("-D")
+        .arg(crate::paths::AppPaths::get().absolute_data_dir())
+        .args(["check", "-c"])
+        .arg(&abs_temp_file_path)
         .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
         .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
         .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")
@@ -1851,6 +2341,87 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_audit_runtime_config_adds_loopback_clash_api_for_tun() {
+        let mut config = serde_json::json!({
+            "inbounds": [{"type": "tun", "tag": "tun-in"}],
+            "route": {},
+            "experimental": {}
+        });
+        let api = prepare_audit_runtime_config(&mut config, true).expect("TUN API config");
+        assert_eq!(config["route"]["find_process"], serde_json::json!(true));
+        assert!(api.base_url.starts_with("http://127.0.0.1:"));
+        assert!(!api.secret.is_empty());
+        assert_eq!(
+            config["experimental"]["clash_api"]["external_controller"],
+            serde_json::json!(api.base_url.trim_start_matches("http://"))
+        );
+    }
+
+    #[test]
+    fn test_prepare_audit_runtime_config_preserves_explicitly_disabled_clash_api() {
+        let mut config = serde_json::json!({
+            "inbounds": [{"type": "tun", "tag": "tun-in"}],
+            "route": {},
+            "experimental": {"clash_api": {}}
+        });
+
+        assert!(prepare_audit_runtime_config(&mut config, true).is_none());
+        assert_eq!(config["route"]["find_process"], serde_json::json!(true));
+        assert_eq!(config["experimental"]["clash_api"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_decorates_final_node_with_subscription_label() {
+        let mut resolved = ResolvedOutbound {
+            kind: RouteKind::Proxy,
+            chain: vec!["代理".to_string(), "hy2台湾09".to_string()],
+            final_node: Some("hy2台湾09".to_string()),
+        };
+        let labels = HashMap::from([("hy2台湾09".to_string(), "飞鸟云".to_string())]);
+
+        decorate_final_node_with_subscription(&mut resolved, &labels);
+
+        assert_eq!(resolved.final_node.as_deref(), Some("飞鸟云/hy2台湾09"));
+    }
+
+    #[test]
+    fn test_audit_line_deduplicator_only_skips_nearby_duplicate_sources() {
+        let mut deduplicator = AuditLineDeduplicator::new();
+        assert!(deduplicator.should_ingest("same line"));
+        assert!(!deduplicator.should_ingest("same line"));
+        deduplicator.recent_lines.insert(
+            "same line".to_string(),
+            Instant::now() - AUDIT_DUPLICATE_WINDOW,
+        );
+        assert!(deduplicator.should_ingest("same line"));
+    }
+
+    #[tokio::test]
+    async fn test_audit_outbound_cache_is_scoped_to_the_current_api_and_ttl() {
+        let config = ClashApiConfig {
+            base_url: "http://127.0.0.1:9090".to_string(),
+            secret: "secret".to_string(),
+        };
+        let cache = RwLock::new(Some(AuditOutboundCache {
+            base_url: config.base_url.clone(),
+            fetched_at: Instant::now(),
+            response: Arc::new(serde_json::json!({"proxies": {}})),
+        }));
+        assert!(cached_audit_proxies(&cache, &config).await.is_some());
+
+        cache.write().await.as_mut().unwrap().fetched_at =
+            Instant::now() - AUDIT_OUTBOUND_CACHE_TTL;
+        assert!(cached_audit_proxies(&cache, &config).await.is_none());
+
+        cache.write().await.as_mut().unwrap().fetched_at = Instant::now();
+        let other_config = ClashApiConfig {
+            base_url: "http://127.0.0.1:9091".to_string(),
+            secret: "secret".to_string(),
+        };
+        assert!(cached_audit_proxies(&cache, &other_config).await.is_none());
+    }
+
+    #[test]
     fn test_should_record_singbox_line() {
         let info_line = "+0800 2026-09-02 23:55:23 INFO inbound/mixed: server started";
         let warn_line = "+0800 2026-09-02 23:55:23 WARN dns: slow query";
@@ -1983,6 +2554,149 @@ mod tests {
         assert!(!mgr3.has_saved_sudo_pass().await);
 
         let _ = std::fs::remove_file(&db_file);
+    }
+
+    #[tokio::test]
+    async fn test_audit_retention_setting_defaults_and_persists() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_file = std::env::temp_dir().join(format!("test_audit_retention_{}.db", unique_id));
+        let db_path = db_file.to_string_lossy().to_string();
+        crate::db::init_db(&db_path).unwrap();
+
+        let manager = SingBoxServiceManager::new();
+        manager.set_db_path(&db_path).await;
+        assert_eq!(manager.audit_retention_minutes().await, 20);
+        assert_eq!(manager.set_audit_retention_minutes(20).await.unwrap(), 20);
+
+        let manager2 = SingBoxServiceManager::new();
+        manager2.set_db_path(&db_path).await;
+        assert_eq!(manager2.audit_retention_minutes().await, 20);
+        assert_eq!(manager2.set_audit_retention_minutes(999).await.unwrap(), 20);
+        assert_eq!(manager2.set_audit_retention_minutes(1).await.unwrap(), 10);
+
+        let _ = std::fs::remove_file(&db_file);
+    }
+
+    #[tokio::test]
+    async fn test_audit_recording_setting_persists_and_disables_ingestion() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_file = std::env::temp_dir().join(format!("test_audit_enabled_{}.db", unique_id));
+        let db_path = db_file.to_string_lossy().to_string();
+        crate::db::init_db(&db_path).unwrap();
+
+        let manager = SingBoxServiceManager::new();
+        manager.set_db_path(&db_path).await;
+        assert!(manager.audit_recording_enabled().await);
+        assert!(!manager.set_audit_recording_enabled(false).await.unwrap());
+        manager
+            .append_log(
+                "INFO[0000] [42 10ms] router: 1.2.3.4:443 tcp using outbound/direct[direct] pid=42",
+            )
+            .await;
+        assert!(manager.get_audit_snapshot().await.is_empty());
+
+        let manager2 = SingBoxServiceManager::new();
+        manager2.set_db_path(&db_path).await;
+        assert!(!manager2.audit_recording_enabled().await);
+        let _ = std::fs::remove_file(&db_file);
+    }
+
+    #[tokio::test]
+    async fn test_audit_snapshot_and_clear_are_separate_from_raw_logs() {
+        let manager = SingBoxServiceManager::new();
+        manager.audit.write().await.set_enabled(true);
+        manager
+            .append_log("INFO[0000] [42 10ms] router: 1.2.3.4:443 tcp using outbound/proxy[proxy] process_name=app.exe pid=42")
+            .await;
+        assert_eq!(manager.get_logs().await.len(), 1);
+        assert_eq!(manager.get_audit_snapshot().await.len(), 1);
+        manager.clear_audit().await;
+        assert!(manager.get_audit_snapshot().await.is_empty());
+        assert_eq!(manager.get_logs().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_audit_queue_reports_full_queue_drops_but_not_closed_queue() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let generation = AtomicU64::new(0);
+        let dropped = AtomicU64::new(0);
+        enqueue_audit_line(&sender, &generation, &dropped, "first");
+        enqueue_audit_line(&sender, &generation, &dropped, "second");
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            receiver.recv().await.map(|line| line.line),
+            Some("first".to_string())
+        );
+
+        drop(receiver);
+        enqueue_audit_line(&sender, &generation, &dropped, "after-close");
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_clear_audit_resets_queue_drop_counter() {
+        let manager = SingBoxServiceManager::new();
+        manager.audit_queue_dropped.store(3, Ordering::Relaxed);
+        manager.clear_audit().await;
+        assert_eq!(manager.audit_queue_dropped_lines(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_clear_audit_discards_lines_queued_before_the_clear() {
+        let manager = SingBoxServiceManager::new();
+        manager.audit.write().await.set_enabled(true);
+        let queued_generation = manager.audit_queue_generation.load(Ordering::Acquire);
+
+        manager.clear_audit().await;
+        ingest_audit_line(
+            manager.audit.clone(),
+            manager.clash_api.clone(),
+            manager.node_subscription_labels.clone(),
+            manager.audit_outbound_cache.clone(),
+            manager.audit_queue_generation.clone(),
+            queued_generation,
+            "INFO[0000] [42 10ms] router: 1.2.3.4:443 tcp using outbound/proxy[proxy] pid=42",
+        )
+        .await;
+
+        assert!(manager.get_audit_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_audit_worker_keeps_dns_observations_for_later_connection_enrichment() {
+        let audit = Arc::new(RwLock::new(ConnectionAuditStore::new()));
+        let generation = Arc::new(AtomicU64::new(0));
+        ingest_audit_line(
+            audit.clone(),
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(None)),
+            generation,
+            0,
+            "INFO[0000] dns: query www.example.com -> 1.2.3.4 pid=123 process_path=C:\\Apps\\demo.exe",
+        )
+        .await;
+
+        let event = audit
+            .write()
+            .await
+            .ingest_line_at(
+                "INFO[0000] [42 3ms] router: 1.2.3.4:443 tcp using outbound/proxy[proxy] process_name=demo.exe process_path=C:\\Apps\\demo.exe pid=123",
+                1_100,
+                None,
+            )
+            .expect("connection should be recorded");
+        assert_eq!(
+            event.target,
+            crate::audit::AuditTarget::Domain("www.example.com".into())
+        );
+        assert_eq!(event.domain_source.as_deref(), Some("dns"));
     }
 
     #[test]

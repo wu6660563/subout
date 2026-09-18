@@ -26,7 +26,7 @@ describe("ruleSetUtils", () => {
     });
   });
 
-  it("keeps local path and removes remote-only fields", () => {
+  it("keeps local path and format while removing remote-only fields", () => {
     const source = {
       type: "local",
       url: "https://example.com/rules",
@@ -38,6 +38,7 @@ describe("ruleSetUtils", () => {
     expect(normalizeRuleSetForType(source, ["proxy"])).toEqual({
       type: "local",
       path: "",
+      format: "source",
     });
     expect(source.url).toBe("https://example.com/rules");
   });

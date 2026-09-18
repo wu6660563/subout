@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   parseDns,
+  parseExperimental,
   parseInbounds,
   parseLog,
   serializeDns,
+  serializeExperimental,
   serializeOutbounds,
 } from "./configSectionTransforms.js";
 
@@ -74,5 +76,31 @@ describe("config section transforms", () => {
     expect(
       serializeOutbounds(data, (outbound) => ({ ...outbound })),
     ).toEqual([{ tag: "proxy", type: "vmess", server_port: 443 }]);
+  });
+
+  it("keeps an explicit empty Clash API object when the editor disables it", () => {
+    const data = {
+      experimental: {
+        cache_file: { enabled: false },
+        clash_api: { enabled: false },
+        _extra: {},
+      },
+    };
+
+    expect(serializeExperimental(data)).toEqual({ clash_api: {} });
+  });
+
+  it("round-trips an empty Clash API object as disabled", () => {
+    const target = {
+      experimental: {
+        cache_file: {},
+        clash_api: {},
+      },
+    };
+
+    parseExperimental(target, { clash_api: {} });
+
+    expect(target.experimental.clash_api.enabled).toBe(false);
+    expect(serializeExperimental(target)).toEqual({ clash_api: {} });
   });
 });

@@ -137,21 +137,31 @@ export const parseExperimental = (target, json) => {
     target.experimental.cache_file.store_fakeip = false;
     target.experimental.cache_file.store_rdrc = false;
   }
-  if (json.clash_api) {
+  const clashApiEnabled =
+    json.clash_api &&
+    typeof json.clash_api === "object" &&
+    Object.keys(json.clash_api).length > 0;
+  if (clashApiEnabled) {
     target.experimental.clash_api.enabled = true;
     target.experimental.clash_api.external_controller =
       json.clash_api.external_controller || "";
     target.experimental.clash_api.external_ui =
       json.clash_api.external_ui || "";
     target.experimental.clash_api.secret = json.clash_api.secret || "";
+    const defaultMode = json.clash_api.default_mode || "Rule";
+    const normalizedMode = String(defaultMode).toLowerCase();
     target.experimental.clash_api.default_mode =
-      json.clash_api.default_mode || "";
+      normalizedMode === "global"
+        ? "Global"
+        : normalizedMode === "direct"
+          ? "Direct"
+          : "Rule";
   } else {
     target.experimental.clash_api.enabled = false;
     target.experimental.clash_api.external_controller = "";
     target.experimental.clash_api.external_ui = "";
     target.experimental.clash_api.secret = "";
-    target.experimental.clash_api.default_mode = "";
+    target.experimental.clash_api.default_mode = "Rule";
   }
   target.experimental._extra = { ...json };
   delete target.experimental._extra.cache_file;
@@ -261,7 +271,10 @@ export const serializeExperimental = (data) => {
       secret: data.experimental.clash_api.secret || undefined,
       default_mode: data.experimental.clash_api.default_mode || undefined,
     };
+  } else {
+    // Keep an explicit disabled marker so the runtime can degrade audit node
+    // resolution instead of re-enabling a local Clash API.
+    obj.clash_api = {};
   }
   return obj;
 };
-

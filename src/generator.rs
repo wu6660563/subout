@@ -148,6 +148,14 @@ pub fn generate_config_with_base(
     sanitize_inbounds_value(&mut inbounds);
     sanitize_outbounds_value(&mut outbounds);
     sanitize_route_value(&mut route);
+    if inbounds.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("tun"))
+    }) && let Some(route_obj) = route.as_object_mut()
+    {
+        route_obj.insert("find_process".to_string(), json!(true));
+    }
     Ok(json!({
         "log": log,
         "dns": dns,
@@ -585,6 +593,22 @@ mod tests {
         assert_eq!(rules[1].get("action").unwrap().as_str(), Some("sniff"));
         assert_eq!(rules[2].get("action").unwrap().as_str(), Some("hijack-dns"));
         assert_eq!(route.get("auto_detect_interface"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_tun_config_enables_process_lookup_for_audit() {
+        let conn = db::init_db(":memory:").unwrap();
+        let result = generate_config_with_base(
+            &conn,
+            json!({"level": "info"}),
+            json!({}),
+            json!([{"type": "tun", "tag": "tun-in"}]),
+            json!([{"type": "direct", "tag": "direct"}]),
+            json!({"final": "direct"}),
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(result["route"]["find_process"], json!(true));
     }
 
     #[test]

@@ -22,6 +22,19 @@ export const normalizeInboundForType = (
     }
     normalized.stack = normalized.stack || "gvisor";
     normalized.auto_route = normalized.auto_route !== false;
+    const excludedAddresses = Array.isArray(normalized.route_exclude_address)
+      ? normalized.route_exclude_address
+      : typeof normalized.route_exclude_address === "string"
+        ? normalized.route_exclude_address.split(/[\n,]/)
+        : [];
+    const normalizedExcludedAddresses = excludedAddresses
+      .map((address) => String(address).trim())
+      .filter(Boolean);
+    if (normalizedExcludedAddresses.length > 0) {
+      normalized.route_exclude_address = normalizedExcludedAddresses;
+    } else {
+      delete normalized.route_exclude_address;
+    }
     delete normalized.listen;
     delete normalized.listen_port;
     if (!isLinux) delete normalized.auto_redirect;
@@ -34,6 +47,7 @@ export const normalizeInboundForType = (
     delete normalized.strict_route;
     delete normalized.mtu;
     delete normalized.auto_redirect;
+    delete normalized.route_exclude_address;
   }
 
   return normalized;

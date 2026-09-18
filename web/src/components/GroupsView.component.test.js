@@ -68,6 +68,7 @@ const mockAllNodes = [
     raw_json: "{}",
     enabled: true,
     is_custom: true,
+    subscription_id: 5,
   },
   {
     id: 2,
@@ -442,6 +443,36 @@ describe("GroupsView - 分流出站组管理", () => {
   });
 
   describe("节点/出站组选择框增强筛选功能", () => {
+    it("左右选择框都显示节点所属订阅名称", async () => {
+      const wrapper = await mountGroupsView();
+      const addBtn = wrapper
+        .findAll("button")
+        .find((b) => b.text().includes("添加出站组"));
+      await addBtn.trigger("click");
+      await flushPromises();
+      await flushPromises();
+
+      const availableNode = wrapper
+        .findAll(".transfer-available-item")
+        .find((item) => item.text().includes("node1"));
+      expect(availableNode.text()).toContain("SubA/node1");
+      expect(availableNode.text()).not.toContain("【");
+      expect(availableNode.text()).not.toContain("】");
+
+      await availableNode.trigger("click");
+      await flushPromises();
+
+      expect(wrapper.find(".pane-column:nth-child(2) .pane-body").text()).toContain(
+        "SubA/node1",
+      );
+      expect(wrapper.find(".pane-column:nth-child(2) .pane-body").text()).not.toContain(
+        "【",
+      );
+      expect(wrapper.find(".pane-column:nth-child(2) .pane-body").text()).not.toContain(
+        "】",
+      );
+    });
+
     it("打开 modal 后加载全部节点供选择", async () => {
       const wrapper = await mountGroupsView();
       global.fetch.mockClear();

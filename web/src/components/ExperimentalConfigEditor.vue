@@ -171,9 +171,9 @@
                           "
                           class="input-control"
                         >
-                          <option value="rule">规则分流 (rule)</option>
-                          <option value="global">全局代理 (global)</option>
-                          <option value="direct">全局直连 (direct)</option>
+                          <option value="Rule">Rule（推荐）— 规则分流</option>
+                          <option value="Global">Global — 全局代理</option>
+                          <option value="Direct">Direct — 全局直连</option>
                         </select>
                       </div>
                     </div>

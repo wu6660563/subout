@@ -16,7 +16,6 @@ export const normalizeRuleSetForType = (ruleSet, availableOutboundTags = []) => 
     delete normalized.url;
     delete normalized.download_detour;
     delete normalized.update_interval;
-    delete normalized.format;
   }
 
   return normalized;

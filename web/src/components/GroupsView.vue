@@ -711,7 +711,7 @@
                               >{{ item.tag }} (系统)</span
                             >
                             <template v-else>
-                              <strong>{{ item.tag }}</strong>
+                              <strong>{{ getNodeDisplayName(item) }}</strong>
                               <small
                                 v-if="item.isNode"
                                 style="
@@ -851,7 +851,7 @@
                                 style="color: var(--text-muted)"
                                 >{{ tag }} (系统)</span
                               >
-                              <span v-else>{{ tag }}</span>
+                              <span v-else>{{ getSelectedNodeDisplayName(tag) }}</span>
                               <small
                                 v-if="getSelectedNode(tag)"
                                 style="
@@ -1113,6 +1113,23 @@ const loadAllNodesForSelector = async () => {
   } catch {}
 };
 
+const getSubLabel = (subId) => {
+  const sub = subList.value.find((item) => String(item.id) === String(subId));
+  return sub ? sub.label : `订阅 #${subId}`;
+};
+
+const getNodeDisplayName = (item) => {
+  const subscriptionName = item.subscription_id
+    ? getSubLabel(item.subscription_id)
+    : "自定义";
+  return `${subscriptionName}/${item.tag}`;
+};
+
+const getSelectedNodeDisplayName = (tag) => {
+  const node = allNodes.value.find((item) => item.tag === tag);
+  return node ? getNodeDisplayName(node) : tag;
+};
+
 // Computed checkable outbounds options list
 const checkableOptions = computed(() => {
   const options = [];
@@ -1148,6 +1165,7 @@ const checkableOptions = computed(() => {
       tag: n.tag,
       isNode: true,
       subId: n.subscription_id ? n.subscription_id : "custom",
+      subscription_id: n.subscription_id,
       title: n.tag,
       geoCountry: n.geo_country,
       tcpLatency: n.last_tcp_latency,
