@@ -1,10 +1,13 @@
 <script setup>
 import JsonTreeView from "./JsonTreeView.vue";
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   previewModal: { type: Object, required: true },
   copyPreviewToClipboard: { type: Function, required: true },
   exportPreviewFile: { type: Function, required: true },
 });
+const previewModal = toRef(props, "previewModal");
 </script>
 
 <template>

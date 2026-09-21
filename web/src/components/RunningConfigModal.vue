@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, ref, watch } from "vue";
+import { nextTick, ref, toRef, watch } from "vue";
 
 const logConsoleRef = ref(null);
 
@@ -19,6 +19,9 @@ const props = defineProps({
   copyLogConsole: { type: Function, required: true },
   saveRunningConfigSettings: { type: Function, required: true },
 });
+
+const runningConfigModal = toRef(props, "runningConfigModal");
+const runningConfigForm = toRef(props, "runningConfigForm");
 
 watch(
   () => [props.runningConfigModal.viewMode, props.runningConfigModal.logs || []],

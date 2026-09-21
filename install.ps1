@@ -877,7 +877,7 @@ Write-Host "======================================================" -ForegroundC
 Write-Host "🎉 subout 安装成功！" -ForegroundColor Green
 Write-Host "======================================================" -ForegroundColor Green
 Write-Host "📍 Web 管理面板地址 : http://127.0.0.1:$Port" -ForegroundColor Cyan
-Write-Host "🔑 默认登录密码     : admin (首次登录后建议修改)" -ForegroundColor White
+Write-Host "🔑 首次启动          : 打开面板后设置管理员密码" -ForegroundColor White
 Write-Host "💾 持久化数据目录   : $DataDir" -ForegroundColor White
 Write-Host "📝 系统日志目录     : $LogDir" -ForegroundColor White
 Write-Host ""

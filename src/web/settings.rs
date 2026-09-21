@@ -116,7 +116,7 @@ pub async fn save_sudo_password(
 
     Ok(Json(serde_json::json!({
         "status": "success",
-        "message": "Sudo 密码已验证并永久保存"
+        "message": "Sudo 密码已验证，仅在本次运行期间保留"
     })))
 }
 

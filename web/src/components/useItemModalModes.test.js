@@ -70,4 +70,39 @@ describe("useItemModalModes", () => {
     expect(itemModal.itemData).not.toHaveProperty("download_detour");
     expect(itemModal.itemData).not.toHaveProperty("update_interval");
   });
+
+  it("removes TUN-only routing and DNS fields after changing to a socket inbound", () => {
+    const itemModal = reactive({
+      mode: "visual",
+      itemType: "inbound",
+      itemData: {
+        type: "http",
+        route_address: ["203.0.113.0/24"],
+        route_exclude_address: ["10.16.0.0/12"],
+        dns_mode: "hijack",
+        dns_address: ["172.19.0.2"],
+      },
+      jsonText: "",
+      error: "",
+      routeRuleLogic: "standard",
+      tempFields: {},
+    });
+    const controller = useItemModalModes({
+      itemModal,
+      isLinux: { value: false },
+      ITEM_ARRAY_FIELDS: [],
+      ITEM_ARRAY_FIELDS_WITHOUT_PORT: [],
+      buildItemTempFields: vi.fn(() => ({})),
+      buildLogicalRuleCriteria: vi.fn(() => []),
+      normalizeStandardRuleFields: vi.fn((data) => ({ ...data })),
+      serializeItemDataForSource: vi.fn((data) => data),
+    });
+
+    controller.syncVisualToItemData();
+
+    expect(itemModal.itemData).not.toHaveProperty("route_address");
+    expect(itemModal.itemData).not.toHaveProperty("route_exclude_address");
+    expect(itemModal.itemData).not.toHaveProperty("dns_mode");
+    expect(itemModal.itemData).not.toHaveProperty("dns_address");
+  });
 });

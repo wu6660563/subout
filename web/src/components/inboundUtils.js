@@ -1,3 +1,13 @@
+const normalizeAddressList = (value) => {
+  const addresses = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n,]/)
+      : [];
+
+  return addresses.map((address) => String(address).trim()).filter(Boolean);
+};
+
 export const normalizeInboundForType = (
   inbound,
   { isLinux, isApplePlatform, isWindowsPlatform } = {},
@@ -22,19 +32,19 @@ export const normalizeInboundForType = (
     }
     normalized.stack = normalized.stack || "gvisor";
     normalized.auto_route = normalized.auto_route !== false;
-    const excludedAddresses = Array.isArray(normalized.route_exclude_address)
-      ? normalized.route_exclude_address
-      : typeof normalized.route_exclude_address === "string"
-        ? normalized.route_exclude_address.split(/[\n,]/)
-        : [];
-    const normalizedExcludedAddresses = excludedAddresses
-      .map((address) => String(address).trim())
-      .filter(Boolean);
-    if (normalizedExcludedAddresses.length > 0) {
-      normalized.route_exclude_address = normalizedExcludedAddresses;
-    } else {
-      delete normalized.route_exclude_address;
+    for (const field of [
+      "route_address",
+      "route_exclude_address",
+      "dns_address",
+    ]) {
+      const addressesForField = normalizeAddressList(normalized[field]);
+      if (addressesForField.length > 0) {
+        normalized[field] = addressesForField;
+      } else {
+        delete normalized[field];
+      }
     }
+    if (!normalized.dns_mode) delete normalized.dns_mode;
     delete normalized.listen;
     delete normalized.listen_port;
     if (!isLinux) delete normalized.auto_redirect;
@@ -47,7 +57,10 @@ export const normalizeInboundForType = (
     delete normalized.strict_route;
     delete normalized.mtu;
     delete normalized.auto_redirect;
+    delete normalized.route_address;
     delete normalized.route_exclude_address;
+    delete normalized.dns_mode;
+    delete normalized.dns_address;
   }
 
   return normalized;

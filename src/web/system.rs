@@ -174,7 +174,7 @@ pub async fn initialize_db(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Clear session token to log out the user, requiring them to log in with "admin"
+    // Clear session token; the fresh database will require a new password setup.
     let mut guard = state.session_token.write().await;
     *guard = None;
 

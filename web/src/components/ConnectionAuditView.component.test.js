@@ -38,6 +38,104 @@ describe("ConnectionAuditView", () => {
     wrapper.unmount();
   });
 
+  it("labels a simulated direct result as sing-box initiated under TUN", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ route: { final: "proxy", rules: [{ domain_suffix: ["mtrcloud.cn"], outbound: "direct" }] }, dns: { final: "dns-foreign", rules: [{ domain_suffix: ["mtrcloud.cn"], server: "dns-local" }] } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    const inputs = wrapper.findAll(".audit-route-test input");
+    await inputs[0].setValue("gitlab.mtrcloud.cn");
+    await wrapper.findAll("button").find((button) => button.text() === "测试路由").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Direct（直连）");
+    expect(wrapper.text()).toContain("sing-box.exe");
+    expect(wrapper.text()).toContain("DNS 推演：命中 DNS 规则 #1 · DNS 服务器 dns-local");
+    wrapper.unmount();
+  });
+
+  it("shows the generated TUN capture, DNS and route settings on demand", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        inbounds: [{ tag: "tun-in", type: "tun", address: ["172.19.0.1/30"], dns_mode: "hijack", dns_address: ["172.19.0.2"], route_address: ["0.0.0.0/1"], route_exclude_address: ["10.16.0.0/12"], auto_route: true, strict_route: true }],
+      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "查看 TUN 状态").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("当前 TUN 状态");
+    expect(wrapper.text()).toContain("172.19.0.1/30");
+    expect(wrapper.text()).toContain("hijack");
+    expect(wrapper.text()).toContain("10.16.0.0/12");
+    expect(wrapper.text()).toContain("严格路由：已开启");
+    wrapper.unmount();
+  });
+
+  it("shows an actionable warning for automatic TUN capture without bypass routes", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        inbounds: [{ type: "tun", auto_route: true, route_address: ["0.0.0.0/0"] }],
+      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "查看 TUN 状态").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("配置提示");
+    expect(wrapper.text()).toContain("若 SDC 依赖原进程身份放行");
+    wrapper.unmount();
+  });
+
+  it("shows when an IP route test bypasses TUN and preserves the original process identity", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        inbounds: [{ type: "tun", auto_route: true, route_exclude_address: ["10.16.0.0/12"] }],
+        route: { final: "direct" },
+      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    await wrapper.findAll(".audit-route-test input")[0].setValue("10.16.228.100");
+    await wrapper.findAll("button").find((button) => button.text() === "测试路由").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("TUN 接管判断：已绕过 TUN");
+    expect(wrapper.text()).toContain("SDC 可看到原始浏览器/沙箱进程");
+    wrapper.unmount();
+  });
+
+  it("uses a supplied resolved IP to show that a domain bypasses TUN", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        inbounds: [{ type: "tun", auto_route: true, route_exclude_address: ["10.16.0.0/12"] }],
+        route: { final: "direct" },
+      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    await wrapper.get('input[placeholder^="域名或 IP"]').setValue("gitlab.mtrcloud.cn");
+    await wrapper.get('input[placeholder^="可选：解析后 IP"]').setValue("10.16.228.100");
+    await wrapper.findAll("button").find((button) => button.text() === "测试路由").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("TUN 接管判断：已绕过 TUN");
+    wrapper.unmount();
+  });
+
   it("keeps expanded state isolated for route-change history rows", async () => {
     global.fetch = vi.fn((url) => {
       if (String(url).includes("/settings")) {

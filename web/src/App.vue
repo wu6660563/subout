@@ -3,16 +3,37 @@
     <LoginBackground :is-dark="isDarkTheme" />
     <div class="login-card">
       <h2>Subout Panel</h2>
-      <p>输入管理员密码以继续</p>
-      <form @submit.prevent="handleLogin">
+      <p>{{ setupRequired ? "首次使用请先设置管理员密码" : "输入管理员密码以继续" }}</p>
+      <form @submit.prevent="setupRequired ? handleSetup() : handleLogin()">
         <div class="input-group">
-          <label for="login-password">密码</label>
+          <label :for="setupRequired ? 'setup-password' : 'login-password'">{{ setupRequired ? "新密码" : "密码" }}</label>
           <input
+            v-if="setupRequired"
+            id="setup-password"
+            v-model="setupPassword"
+            type="password"
+            class="input-control"
+            placeholder="••••••••"
+            required
+          />
+          <input
+            v-else
             id="login-password"
             v-model="loginPassword"
             type="password"
             class="input-control"
             placeholder="••••••••"
+            required
+          />
+        </div>
+        <div v-if="setupRequired" class="input-group">
+          <label for="setup-password-confirm">确认新密码</label>
+          <input
+            id="setup-password-confirm"
+            v-model="setupPasswordConfirm"
+            type="password"
+            class="input-control"
+            placeholder="再次输入新密码"
             required
           />
         </div>
@@ -29,14 +50,14 @@
               d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"
             />
           </svg>
-          {{ loggingIn ? "登录中..." : "登录" }}
+          {{ loggingIn ? (setupRequired ? "设置中..." : "登录中...") : (setupRequired ? "设置并登录" : "登录") }}
         </button>
       </form>
       <div
         v-if="loginError"
         style="color: var(--danger); margin-top: 1rem; font-size: 0.9rem"
       >
-        密码不正确，请重试
+        {{ setupRequired ? setupError : "密码不正确，请重试" }}
       </div>
     </div>
   </div>
@@ -816,6 +837,10 @@ const currentView = ref(
 );
 const activeTheme = ref("system");
 const loginPassword = ref("");
+const setupPassword = ref("");
+const setupPasswordConfirm = ref("");
+const setupRequired = ref(false);
+const setupError = ref("");
 const loggingIn = ref(false);
 const loginError = ref(false);
 
@@ -892,6 +917,17 @@ const getThemeButtonStyle = (mode) => {
   };
 };
 
+const acceptLogin = async (data) => {
+  token.value = data.token;
+  localStorage.setItem("admin_token", data.token);
+  showToast("登录成功");
+  await initAjv();
+  await fetchSystemMode();
+  await fetchKernelInfo();
+  await fetchServiceStatus();
+  handleRouting();
+};
+
 const handleLogin = async () => {
   loggingIn.value = true;
   loginError.value = false;
@@ -903,15 +939,7 @@ const handleLogin = async () => {
       signal: AbortSignal.timeout(8000),
     });
     if (res.ok) {
-      const data = await res.json();
-      token.value = data.token;
-      localStorage.setItem("admin_token", data.token);
-      showToast("登录成功");
-      await initAjv();
-      await fetchSystemMode();
-      await fetchKernelInfo();
-      await fetchServiceStatus();
-      handleRouting();
+      await acceptLogin(await res.json());
     } else {
       loginError.value = true;
     }
@@ -919,6 +947,57 @@ const handleLogin = async () => {
     showToast("登录网络请求失败", "danger");
   } finally {
     loggingIn.value = false;
+  }
+};
+
+const handleSetup = async () => {
+  setupError.value = "";
+  loginError.value = false;
+  if (setupPassword.value.length < 8) {
+    setupError.value = "管理员密码至少需要 8 个字符";
+    loginError.value = true;
+    return;
+  }
+  if (setupPassword.value !== setupPasswordConfirm.value) {
+    setupError.value = "两次输入的密码不一致";
+    loginError.value = true;
+    return;
+  }
+
+  loggingIn.value = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: setupPassword.value }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      setupError.value = (await res.text()) || "管理员密码设置失败";
+      loginError.value = true;
+      return;
+    }
+    setupRequired.value = false;
+    await acceptLogin(await res.json());
+  } catch {
+    setupError.value = "密码设置请求失败";
+    loginError.value = true;
+  } finally {
+    loggingIn.value = false;
+  }
+};
+
+const loadSetupStatus = async () => {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/setup-status`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    setupRequired.value = data.required === true;
+    return setupRequired.value;
+  } catch {
+    return false;
   }
 };
 
@@ -989,6 +1068,17 @@ const verifyToken = async () => {
   }
 };
 
+const initializeAuth = async () => {
+  if (token.value) {
+    await verifyToken();
+    if (!token.value) {
+      await loadSetupStatus();
+    }
+    return;
+  }
+  await loadSetupStatus();
+};
+
 watch(token, (newToken) => {
   if (newToken) {
     verifyToken();
@@ -1011,7 +1101,7 @@ onMounted(() => {
   updateThemeState();
   mediaQuery.addEventListener("change", handleSystemThemeChange);
 
-  verifyToken();
+  void initializeAuth();
   sendBrowserPresence();
   browserPresenceTimer = setInterval(sendBrowserPresence, 1200);
 

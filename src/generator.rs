@@ -97,10 +97,9 @@ pub fn sanitize_dns_value(dns: &mut Value) {
             for server in servers {
                 if let Some(srv_obj) = server.as_object_mut()
                     && srv_obj.get("type").and_then(|t| t.as_str()) == Some("fakeip")
+                    && !srv_obj.contains_key("inet4_range")
                 {
-                    if !srv_obj.contains_key("inet4_range") {
-                        srv_obj.insert("inet4_range".to_string(), json!("198.18.0.0/15"));
-                    }
+                    srv_obj.insert("inet4_range".to_string(), json!("198.18.0.0/15"));
                 }
             }
         }

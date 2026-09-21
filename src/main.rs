@@ -271,7 +271,10 @@ async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = args.output.as_ref().unwrap();
 
     if args.verbose {
-        eprintln!("[Info] Loading subscription from: {}", source);
+        eprintln!(
+            "[Info] Loading subscription from: {}",
+            subout::redact_url_for_log(source)
+        );
     }
 
     let (content, source_type) = subout::load_subscription_content(source).await?;

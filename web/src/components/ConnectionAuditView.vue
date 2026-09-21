@@ -4,6 +4,7 @@
       <div>
         <h1>连接审计</h1>
         <p>查看 TUN 流量对应的进程、目标、路由和最终代理节点。</p>
+        <small class="audit-direct-note">提示：TUN 接管后，即使命中 Direct，连接仍由 sing-box 发起；Direct 仅表示不经代理节点，不能恢复浏览器等原进程的网络身份。</small>
       </div>
       <div class="audit-actions">
         <label class="audit-retention-label">
@@ -14,6 +15,7 @@
         </label>
         <label class="audit-check"><input v-model="recordingEnabled" type="checkbox" @change="saveAuditSettings" /> 记录连接审计日志</label>
         <button class="btn btn-secondary btn-sm" @click="fetchAudit">刷新</button>
+        <button class="btn btn-secondary btn-sm" :disabled="tunStatusLoading" @click="loadTunStatus">{{ tunStatusLoading ? '读取中...' : '查看 TUN 状态' }}</button>
         <button class="btn btn-secondary btn-sm" @click="clearAudit">清空日志</button>
       </div>
     </div>
@@ -44,6 +46,42 @@
       </select>
       <button class="btn btn-secondary btn-sm" @click="toggleSortDirection">{{ sortDirection === 'desc' ? '降序' : '升序' }}</button>
       <button class="btn btn-secondary btn-sm" @click="exportFilteredEvents">导出 JSON</button>
+    </div>
+
+    <div class="audit-route-test">
+      <strong>路由测试</strong>
+      <input v-model="routeTest.domain" class="input-control" placeholder="域名或 IP，例如 gitlab.mtrcloud.cn" />
+      <input v-model="routeTest.resolvedIp" class="input-control" placeholder="可选：解析后 IP，例如 10.16.228.100" />
+      <input v-model.number="routeTest.port" class="input-control" type="number" placeholder="端口" />
+      <input v-model="routeTest.processName" class="input-control" placeholder="可选：进程名，例如 msedge.exe" />
+      <input v-model="routeTest.processPath" class="input-control" placeholder="可选：进程路径，例如 C:/Program Files/SDC/browser.exe" />
+      <select v-model="routeTest.network" class="input-control"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+      <button class="btn btn-secondary btn-sm" :disabled="routeTestLoading" @click="runRouteTest">{{ routeTestLoading ? '测试中...' : '测试路由' }}</button>
+      <span v-if="routeTestError" class="audit-error">{{ routeTestError }}</span>
+    </div>
+    <div v-if="routeTestResult" class="audit-route-result" :class="routeTestResult.routeKind === 'DIRECT' ? 'direct' : 'proxy'">
+      <strong>结果：{{ routeTestResult.routeKind === 'DIRECT' ? 'Direct（直连）' : '代理' }}</strong>
+      <span> · {{ routeTestResult.matchedRuleIndex == null ? '未命中规则，使用 final' : `命中规则 #${routeTestResult.matchedRuleIndex + 1}` }} · 出站 {{ routeTestResult.outbound }}</span>
+      <small>{{ routeTestResult.directNotice }}</small>
+      <small v-if="routeTestTunResult">TUN 接管判断：{{ tunCaptureLabel(routeTestTunResult.status) }} · {{ routeTestTunResult.message }}</small>
+      <small v-if="routeTestResult.routeKind === 'DIRECT' && routeTestTunResult?.status !== 'BYPASSED'">专项检查：确认 TUN 是否接管该目标；若已接管，请检查 SDC / WFP / 防火墙是否允许 sing-box.exe 出站。需要保留原进程身份时，将最小目标 CIDR 加入“绕过地址”。</small>
+      <small v-if="routeTestDnsResult">DNS 推演：{{ routeTestDnsResult.matchedRuleIndex == null ? '未命中 DNS 规则，使用 final' : `命中 DNS 规则 #${routeTestDnsResult.matchedRuleIndex + 1}` }} · DNS 服务器 {{ routeTestDnsResult.server || '未配置' }}</small>
+      <small v-if="routeTestResult.limitations">{{ routeTestResult.limitations }}</small>
+      <small v-if="routeTestResult.skippedRules?.length">前序未命中：<span v-for="rule in routeTestResult.skippedRules" :key="rule.index">规则 #{{ rule.index + 1 }}（{{ rule.reasons.join('、') }}） </span></small>
+    </div>
+    <div v-if="tunStatus || tunStatusError" class="audit-tun-status">
+      <strong>当前 TUN 状态</strong>
+      <template v-if="tunStatus">
+        <span> · 标签：{{ tunStatus.tag || '未命名' }}</span>
+        <span> · 地址：{{ formatTunValues(tunStatus.address) }}</span>
+        <span> · DNS：{{ tunStatus.dns_mode || 'sing-box 默认' }}{{ tunStatus.dns_address ? `（${formatTunValues(tunStatus.dns_address)}）` : '' }}</span>
+        <span> · 接管网段：{{ tunStatus.route_address ? formatTunValues(tunStatus.route_address) : (tunStatus.auto_route === false ? '未配置' : '由 auto_route 自动下发') }}</span>
+        <span> · 绕过网段：{{ formatTunValues(tunStatus.route_exclude_address) }}</span>
+        <span> · 自动路由：{{ tunStatus.auto_route === false ? '已关闭' : '已开启' }}</span>
+        <span> · 严格路由：{{ tunStatus.strict_route ? '已开启' : '未开启' }}</span>
+        <small v-if="tunStatusWarnings.length" class="audit-error">配置提示：<span v-for="warning in tunStatusWarnings" :key="warning">{{ warning }} </span></small>
+      </template>
+      <small v-if="tunStatusError" class="audit-error">{{ tunStatusError }}</small>
     </div>
 
     <div v-if="errorMessage" class="audit-error">{{ errorMessage }}</div>
@@ -98,6 +136,8 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { API_BASE, confirmDialog, showToast, token } from "../store.js";
 import { RETENTION_OPTIONS, filterAuditEvents, formatAuditChain, formatAuditTarget, formatMatchedRule, normalizeAuditResponse, normalizeRetentionMinutes, sortAuditEvents } from "./connectionAuditUtils.js";
+import { simulateDnsRoute, simulateRoute, simulateTunCapture } from "./routeSimulationUtils.js";
+import { getTunRiskWarnings } from "./tunStatusUtils.js";
 
 const events = ref([]);
 const currentEvents = ref([]);
@@ -114,6 +154,15 @@ const sortDirection = ref("desc");
 const expanded = reactive(new Set());
 const pendingNewEventIds = reactive(new Set());
 const filters = reactive({ process: "", target: "", node: "", route: "", protocol: "" });
+const routeTest = reactive({ domain: "", resolvedIp: "", port: 443, network: "tcp", processName: "", processPath: "" });
+const routeTestResult = ref(null);
+const routeTestDnsResult = ref(null);
+const routeTestTunResult = ref(null);
+const routeTestError = ref("");
+const routeTestLoading = ref(false);
+const tunStatus = ref(null);
+const tunStatusError = ref("");
+const tunStatusLoading = ref(false);
 let pollTimer = null;
 let auditFetchInFlight = false;
 
@@ -124,6 +173,7 @@ const filteredEvents = computed(() => sortAuditEvents(filterAuditEvents(events.v
 const capReached = computed(() => Boolean(health.value?.event_cap_reached));
 const droppedAuditLines = computed(() => Number(health.value?.dropped_lines || 0));
 const newestFirst = computed(() => sortField.value === "last_seen" && sortDirection.value === "desc");
+const tunStatusWarnings = computed(() => getTunRiskWarnings(tunStatus.value));
 const earliestExpiry = computed(() => {
   if (!currentEvents.value.length) return "";
   const earliest = Math.min(...currentEvents.value.map((event) => Number(event.last_seen || event.first_seen || 0)).filter(Boolean));
@@ -195,6 +245,55 @@ async function fetchAudit() {
     errorMessage.value = `连接审计读取失败：${error.message}`;
   } finally {
     auditFetchInFlight = false;
+  }
+}
+
+async function runRouteTest() {
+  const domain = routeTest.domain.trim();
+  if (!domain) { routeTestError.value = "请输入域名或 IP"; return; }
+  routeTestLoading.value = true;
+  routeTestError.value = "";
+  try {
+    const response = await fetch(`${API_BASE}/api/config/generated`, { headers: { Authorization: `Bearer ${token.value}` } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const config = await response.json();
+    routeTestResult.value = simulateRoute({ domain, port: routeTest.port, network: routeTest.network, processName: routeTest.processName, processPath: routeTest.processPath }, config);
+    routeTestDnsResult.value = simulateDnsRoute(domain, config);
+    routeTestTunResult.value = simulateTunCapture({ domain, resolvedIp: routeTest.resolvedIp }, config);
+  } catch (error) { routeTestError.value = `路由测试失败：${error.message}`; }
+  finally { routeTestLoading.value = false; }
+}
+
+function tunCaptureLabel(status) {
+  return {
+    BYPASSED: "已绕过 TUN",
+    CAPTURED: "会进入 TUN",
+    LIKELY_CAPTURED: "可能进入 TUN",
+    NEEDS_RESOLUTION: "需要解析 IP",
+    NO_TUN: "未启用 TUN",
+    UNKNOWN: "无法静态确定",
+  }[status] || "未知";
+}
+
+function formatTunValues(value) {
+  if (Array.isArray(value)) return value.length ? value.join("、") : "未配置";
+  return value == null || value === "" ? "未配置" : String(value);
+}
+
+async function loadTunStatus() {
+  tunStatusLoading.value = true;
+  tunStatusError.value = "";
+  try {
+    const response = await fetch(`${API_BASE}/api/config/generated`, { headers: { Authorization: `Bearer ${token.value}` } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const config = await response.json();
+    tunStatus.value = (Array.isArray(config.inbounds) ? config.inbounds : []).find((inbound) => inbound?.type === "tun") || null;
+    if (!tunStatus.value) tunStatusError.value = "当前生成配置未包含 TUN 入站";
+  } catch (error) {
+    tunStatus.value = null;
+    tunStatusError.value = `读取 TUN 状态失败：${error.message}`;
+  } finally {
+    tunStatusLoading.value = false;
   }
 }
 

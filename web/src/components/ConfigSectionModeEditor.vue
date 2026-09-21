@@ -49,11 +49,15 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   section: { type: String, required: true },
   mode: { type: String, required: true },
   rawJson: { type: Object, required: true },
 });
+
+const rawJson = toRef(props, "rawJson");
 
 const emit = defineEmits(["set-mode"]);
 </script>

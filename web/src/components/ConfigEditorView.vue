@@ -247,9 +247,6 @@ import {
   getGroupNodeCount,
 } from "../utils/groupImport.js";
 import {
-  getOutboundTypeDisplay,
-  getProtocolBadgeClass,
-  getProxyTypeDisplay,
   sanitizeOutboundItem,
 } from "./outboundUtils.js";
 import {
@@ -279,16 +276,9 @@ import {
   normalizeDnsServerForType,
 } from "./dnsServerUtils.js";
 import { extractCriteriaFromObj } from "./routeRuleDuplicateUtils.js";
-import { getRuleSummaryText as getRuleSummaryTextUtil } from "./ruleSummaryUtils.js";
-import {
-  buildSyncedRule as buildSyncedRuleUtil,
-  getRuleSyncValidationError,
-} from "./ruleSyncUtils.js";
 import { serializeConfigState } from "./configStateSerialization.js";
 import {
-  formatRunningConfigLogs,
   getRunningConfigName as getRunningConfigNameUtil,
-  isConfigRunning,
 } from "./runningConfigUtils.js";
 import { appendPresetProcesses } from "./processPresetUtils.js";
 import { orderConfigSections } from "./configPreviewUtils.js";
@@ -318,7 +308,8 @@ import {
   getInitialActiveSection as getInitialActiveSectionFromHash,
 } from "./configRouteUtils.js";
 import { useImportSelections } from "./useImportSelections.js";
-import JsonTreeView from "./JsonTreeView.vue";
+// Used by the <running-config-modal> element in the template.
+// eslint-disable-next-line no-unused-vars
 import RunningConfigModal from "./RunningConfigModal.vue";
 import ConfigPreviewModal from "./ConfigPreviewModal.vue";
 import ConfigImportModal from "./ConfigImportModal.vue";
@@ -397,12 +388,6 @@ const {
   parseOutbounds,
   parseRoute,
   parseExperimental,
-  serializeLog,
-  serializeDns,
-  serializeInbounds,
-  serializeOutbounds,
-  serializeRoute,
-  serializeExperimental,
   sectionParsers,
   sectionSerializers,
 } = useConfigEditorState({
@@ -413,7 +398,6 @@ const {
 
 const {
   getFullConfigData,
-  validateFullConfigData,
   validateFullConfigWithSingbox,
 } = useConfigValidation({
   apiBase: API_BASE,
@@ -428,7 +412,6 @@ const {
 
 const {
   duplicateRouteRulesInfo,
-  isDuplicateCriteriaItem,
   hasDuplicateInField,
 } = useRouteRuleDuplicates({ configData });
 
@@ -452,7 +435,6 @@ const groupImportModal = reactive({
 
 const {
   domainWizardModal,
-  calculateRecommendations,
   sortedOutboundsForSelect,
   matchingExistingRule,
   confirmApplyDomainWizard,
@@ -610,7 +592,6 @@ const {
   selectConfig,
   syncLatestResources,
   exportConfigById,
-  loadHistoryConfig,
 } = useConfigHistoryData({
   apiBase: API_BASE,
   token,
@@ -681,7 +662,7 @@ const { loadAllSections } = useConfigLoader({
   showToast,
 });
 
-const { setSectionMode, saveVueConfigSection } = useConfigSectionModes({
+const { setSectionMode } = useConfigSectionModes({
   apiBase: API_BASE,
   token,
   sectionModes,
@@ -768,7 +749,7 @@ const { openNodePoolImport, confirmNodePoolImport, importGroup } = useNodePoolIm
 const getSerializedState = () =>
   serializeConfigState(sections, sectionModes, rawJson, sectionSerializers);
 
-const { saveItem, validateItemModal } = useItemPersistence({
+const { saveItem } = useItemPersistence({
   itemModal,
   configData,
   isLinux,

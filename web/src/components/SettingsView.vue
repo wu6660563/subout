@@ -74,10 +74,9 @@
             line-height: 1.5;
           "
         >
-          此操作将清空所有配置、订阅数据、节点池及配置历史记录，并将管理员密码还原至默认状态。
+          此操作将清空所有配置、订阅数据、节点池及配置历史记录，并要求您重新设置管理员密码。
           <br />
-          <strong>警告：此操作不可逆！</strong> 初始化完成后，您需要使用默认密码
-          <code>admin</code> 重新登录。
+          <strong>警告：此操作不可逆！</strong> 初始化完成后，您需要先设置新的管理员密码。
         </p>
         <button
           class="btn btn-danger"
@@ -584,6 +583,9 @@ const changePassword = async () => {
     });
 
     if (res.ok) {
+      const data = await res.json();
+      token.value = data.token;
+      localStorage.setItem("admin_token", data.token);
       showToast("密码更新成功");
       passwords.old = "";
       passwords.new = "";

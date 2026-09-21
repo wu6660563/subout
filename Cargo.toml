@@ -15,6 +15,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 anyhow = "1.0"
 sha2 = "0.10"
+argon2 = "0.5"
+rand = "0.9"
+rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 percent-encoding = "2.3"
 url = "2.5"

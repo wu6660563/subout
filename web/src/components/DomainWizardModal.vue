@@ -368,7 +368,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   domainWizardModal: {
     type: Object,
     required: true,
@@ -382,6 +384,8 @@ defineProps({
     default: false,
   },
 });
+
+const domainWizardModal = toRef(props, "domainWizardModal");
 
 const emit = defineEmits([
   "close",

@@ -123,38 +123,38 @@ impl PlatformStrategy for WindowsPlatform {
 
         #[cfg(windows)]
         {
-            type HANDLE = *mut std::ffi::c_void;
-            type BOOL = i32;
-            type DWORD = u32;
+            type Handle = *mut std::ffi::c_void;
+            type Bool = i32;
+            type Dword = u32;
 
-            const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
-            const SYNCHRONIZE: DWORD = 0x00100000;
-            const WAIT_TIMEOUT: DWORD = 0x00000102;
-            const STILL_ACTIVE: DWORD = 259;
-            const ERROR_ACCESS_DENIED: DWORD = 5;
+            const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
+            const SYNCHRONIZE: Dword = 0x00100000;
+            const WAIT_TIMEOUT: Dword = 0x00000102;
+            const STILL_ACTIVE: Dword = 259;
+            const ERROR_ACCESS_DENIED: Dword = 5;
 
             unsafe extern "system" {
                 fn OpenProcess(
-                    dwDesiredAccess: DWORD,
-                    bInheritHandle: BOOL,
-                    dwProcessId: DWORD,
-                ) -> HANDLE;
-                fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) -> DWORD;
-                fn GetExitCodeProcess(hProcess: HANDLE, lpExitCode: *mut DWORD) -> BOOL;
-                fn CloseHandle(hObject: HANDLE) -> BOOL;
+                    dwDesiredAccess: Dword,
+                    bInheritHandle: Bool,
+                    dwProcessId: Dword,
+                ) -> Handle;
+                fn WaitForSingleObject(hHandle: Handle, dwMilliseconds: Dword) -> Dword;
+                fn GetExitCodeProcess(hProcess: Handle, lpExitCode: *mut Dword) -> Bool;
+                fn CloseHandle(hObject: Handle) -> Bool;
             }
 
             let handle =
                 unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
             if !handle.is_null() {
                 let wait_res = unsafe { WaitForSingleObject(handle, 0) };
-                let mut exit_code: DWORD = 0;
+                let mut exit_code: Dword = 0;
                 let get_code_res = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
                 unsafe { CloseHandle(handle) };
 
                 wait_res == WAIT_TIMEOUT || (get_code_res != 0 && exit_code == STILL_ACTIVE)
             } else {
-                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as DWORD;
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as Dword;
                 err == ERROR_ACCESS_DENIED
             }
         }
@@ -184,16 +184,15 @@ impl PlatformStrategy for WindowsPlatform {
                 "Get-CimInstance Win32_Process -Filter \"Name = 'sing-box.exe' or Name = 'singbox.exe' or Name = 'sing-box'\" | Select-Object ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath | ConvertTo-Json -Compress",
             ])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                cim_query_succeeded = true;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let items = parse_cim_process_json(&stdout);
-                let filtered = filter_conflicting_processes(items, current_pid, managed_pid, running_config_path);
-                for proc in filtered {
-                    if seen_pids.insert(proc.pid) {
-                        results.push(proc);
-                    }
+            cim_query_succeeded = true;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let items = parse_cim_process_json(&stdout);
+            let filtered = filter_conflicting_processes(items, current_pid, managed_pid, running_config_path);
+            for proc in filtered {
+                if seen_pids.insert(proc.pid) {
+                    results.push(proc);
                 }
             }
         }

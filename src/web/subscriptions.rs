@@ -44,12 +44,13 @@ pub async fn add_subscription(
     let id = db::add_subscription(&conn, &payload.url, &payload.label, &kws, delete_on_update)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let safe_url = crate::redact_url_for_log(&payload.url);
     let _ = db::log_history(
         &conn,
         "订阅管理",
         "添加订阅",
         &format!("添加订阅源: {}", payload.label),
-        Some(&payload.url),
+        Some(&safe_url),
     );
 
     let sub = db::Subscription {
@@ -95,12 +96,13 @@ pub async fn update_subscription(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let safe_url = crate::redact_url_for_log(&payload.url);
     let _ = db::log_history(
         &conn,
         "订阅管理",
         "修改订阅",
         &format!("更新订阅源: {}", payload.label),
-        Some(&payload.url),
+        Some(&safe_url),
     );
 
     Ok(StatusCode::OK)

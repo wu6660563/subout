@@ -76,7 +76,10 @@ const syncVisualToItemData = () => {
       delete itemModal.itemData.strict_route;
       delete itemModal.itemData.mtu;
       delete itemModal.itemData.auto_redirect;
+      delete itemModal.itemData.route_address;
       delete itemModal.itemData.route_exclude_address;
+      delete itemModal.itemData.dns_mode;
+      delete itemModal.itemData.dns_address;
     }
   }
   if (itemModal.itemType === "route_ruleset") {

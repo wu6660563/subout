@@ -1,8 +1,12 @@
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   importModal: { type: Object, required: true },
   confirmImport: { type: Function, required: true },
 });
+
+const importModal = toRef(props, "importModal");
 </script>
 
 <template>

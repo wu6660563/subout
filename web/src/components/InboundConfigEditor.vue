@@ -183,9 +183,41 @@
                                       text-align: right;
                                       padding-top: 0.35rem;
                                     "
+                                    >接管地址:</span
+                                  >
+                                  <div style="flex: 1; min-width: 0">
+                                    <textarea
+                                      :value="Array.isArray(inb.route_address) ? inb.route_address.join('\n') : ''"
+                                      class="input-control table-input"
+                                      style="width: 100%; min-height: 54px; resize: vertical"
+                                      placeholder="203.0.113.0/24&#10;每行或逗号分隔一个 CIDR"
+                                      @blur="inb.route_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                                    ></textarea>
+                                    <small style="color: var(--text-muted)">
+                                      route_address：仅将这些目标网段路由到 TUN；留空则使用默认路由。
+                                    </small>
+                                  </div>
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; align-items: flex-start">
+                                  <span
+                                    style="
+                                      width: 60px;
+                                      color: var(--text-muted);
+                                      flex-shrink: 0;
+                                      text-align: right;
+                                      padding-top: 0.35rem;
+                                    "
                                     >绕过地址:</span
                                   >
                                   <div style="flex: 1; min-width: 0">
+                                    <button
+                                      type="button"
+                                      class="btn btn-secondary"
+                                      style="padding: 0.2rem 0.45rem; font-size: 0.75rem; margin-bottom: 0.35rem"
+                                      @click="addPrivateBypassPresets(inb)"
+                                    >
+                                      + 添加常用内网
+                                    </button>
                                     <textarea
                                       :value="Array.isArray(inb.route_exclude_address) ? inb.route_exclude_address.join('\n') : ''"
                                       class="input-control table-input"
@@ -195,6 +227,40 @@
                                     ></textarea>
                                     <small style="color: var(--text-muted)">
                                       route_exclude_address：匹配的目标不进入 TUN，由原进程直接连接。
+                                    </small>
+                                  </div>
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; align-items: flex-start">
+                                  <span
+                                    style="
+                                      width: 60px;
+                                      color: var(--text-muted);
+                                      flex-shrink: 0;
+                                      text-align: right;
+                                      padding-top: 0.35rem;
+                                    "
+                                    >TUN DNS:</span
+                                  >
+                                  <div style="flex: 1; min-width: 0">
+                                    <select
+                                      v-model="inb.dns_mode"
+                                      class="input-control table-input"
+                                      style="width: 100%; margin-bottom: 0.35rem"
+                                    >
+                                      <option value="">自动（sing-box 默认）</option>
+                                      <option value="native">native</option>
+                                      <option value="hijack">hijack</option>
+                                      <option value="disabled">disabled</option>
+                                    </select>
+                                    <textarea
+                                      :value="Array.isArray(inb.dns_address) ? inb.dns_address.join('\n') : ''"
+                                      class="input-control table-input"
+                                      style="width: 100%; min-height: 54px; resize: vertical"
+                                      placeholder="172.19.0.2&#10;每行或逗号分隔一个 DNS 地址"
+                                      @blur="inb.dns_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                                    ></textarea>
+                                    <small style="color: var(--text-muted)">
+                                      指定 dns_address 后，请确认路由规则中已配置 hijack-dns。
                                     </small>
                                   </div>
                                 </div>
@@ -272,6 +338,8 @@
 </template>
 
 <script setup>
+import { addSafePrivateBypassAddresses } from "./tunRouteUtils.js";
+
 defineProps({
   configData: { type: Object, required: true },
   isLinux: { type: Boolean, default: true },
@@ -285,4 +353,11 @@ const emit = defineEmits([
   "edit-item",
   "remove-inbound",
 ]);
+
+const addPrivateBypassPresets = (inbound) => {
+  inbound.route_exclude_address = addSafePrivateBypassAddresses(
+    inbound.route_exclude_address,
+    inbound,
+  );
+};
 </script>

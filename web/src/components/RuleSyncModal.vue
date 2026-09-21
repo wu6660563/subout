@@ -235,12 +235,16 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   ruleSyncModal: { type: Object, required: true },
   configData: { type: Object, required: true },
   allOutboundTags: { type: Array, default: () => [] },
   getRuleSummaryText: { type: Function, required: true },
 });
+
+const ruleSyncModal = toRef(props, "ruleSyncModal");
 
 const emit = defineEmits(["close", "confirm-sync"]);
 </script>

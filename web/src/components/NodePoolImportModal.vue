@@ -314,7 +314,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   nodePoolModal: { type: Object, required: true },
   filteredNodePoolNodes: { type: Array, default: () => [] },
   selectableNodePoolNodes: { type: Array, default: () => [] },
@@ -322,6 +324,8 @@ defineProps({
   isAllNodePoolSelected: { type: Boolean, default: false },
   getNodeStatus: { type: Function, required: true },
 });
+
+const nodePoolModal = toRef(props, "nodePoolModal");
 
 const emit = defineEmits([
   "close",

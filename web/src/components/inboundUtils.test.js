@@ -65,6 +65,38 @@ describe("inboundUtils", () => {
     ).not.toHaveProperty("route_exclude_address");
   });
 
+  it("normalizes TUN capture and DNS fields and removes them from socket inbounds", () => {
+    expect(
+      normalizeInboundForType(
+        {
+          type: "tun",
+          address: ["172.19.0.1/30"],
+          route_address: " 203.0.113.0/24,\n2001:db8::/32 ",
+          dns_mode: "hijack",
+          dns_address: " 172.19.0.2\nfd00::2 ",
+        },
+        { isLinux: false, isApplePlatform: false, isWindowsPlatform: true },
+      ),
+    ).toMatchObject({
+      route_address: ["203.0.113.0/24", "2001:db8::/32"],
+      dns_mode: "hijack",
+      dns_address: ["172.19.0.2", "fd00::2"],
+    });
+
+    const socketInbound = normalizeInboundForType(
+      {
+        type: "http",
+        route_address: ["203.0.113.0/24"],
+        dns_mode: "hijack",
+        dns_address: ["172.19.0.2"],
+      },
+      { isLinux: false, isApplePlatform: false, isWindowsPlatform: true },
+    );
+    expect(socketInbound).not.toHaveProperty("route_address");
+    expect(socketInbound).not.toHaveProperty("dns_mode");
+    expect(socketInbound).not.toHaveProperty("dns_address");
+  });
+
   it("applies listen defaults for non-tun inbounds", () => {
     expect(
       normalizeInboundForType(

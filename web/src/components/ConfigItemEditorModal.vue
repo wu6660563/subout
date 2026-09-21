@@ -612,7 +612,28 @@
                   </small>
                 </div>
                 <div class="input-group" style="margin-bottom: 1rem">
+                  <label>仅接管到 TUN 的目标地址 (route_address)</label>
+                  <textarea
+                    :value="Array.isArray(itemModal.itemData.route_address) ? itemModal.itemData.route_address.join('\n') : ''"
+                    class="input-control"
+                    style="min-height: 88px; resize: vertical"
+                    placeholder="203.0.113.0/24&#10;每行或逗号分隔一个 CIDR"
+                    @blur="itemModal.itemData.route_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                  ></textarea>
+                  <small style="color: var(--text-muted)">
+                    填写后仅这些目标网段由 TUN 接管；留空时使用默认路由。
+                  </small>
+                </div>
+                <div class="input-group" style="margin-bottom: 1rem">
                   <label>绕过 TUN 的目标地址 (route_exclude_address)</label>
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-small"
+                    style="margin-bottom: 0.5rem"
+                    @click="addPrivateBypassPresets"
+                  >
+                    + 添加常用内网
+                  </button>
                   <textarea
                     :value="Array.isArray(itemModal.itemData.route_exclude_address) ? itemModal.itemData.route_exclude_address.join('\n') : ''"
                     class="input-control"
@@ -624,6 +645,30 @@
                     匹配的流量不进入 TUN，保留原进程网络身份；建议先填写精确地址或最小网段。
                   </small>
                 </div>
+                <div class="grid-2" style="margin-bottom: 1rem">
+                  <div class="input-group">
+                    <label>TUN DNS 模式 (dns_mode)</label>
+                    <select v-model="itemModal.itemData.dns_mode" class="input-control">
+                      <option value="">自动（sing-box 默认）</option>
+                      <option value="native">native</option>
+                      <option value="hijack">hijack</option>
+                      <option value="disabled">disabled</option>
+                    </select>
+                  </div>
+                  <div class="input-group">
+                    <label>TUN DNS 地址 (dns_address)</label>
+                    <textarea
+                      :value="Array.isArray(itemModal.itemData.dns_address) ? itemModal.itemData.dns_address.join('\n') : ''"
+                      class="input-control"
+                      style="min-height: 72px; resize: vertical"
+                      placeholder="172.19.0.2&#10;每行或逗号分隔一个地址"
+                      @blur="itemModal.itemData.dns_address = $event.target.value.split(/[,\n]/).map((value) => value.trim()).filter(Boolean)"
+                    ></textarea>
+                  </div>
+                </div>
+                <small style="color: var(--text-muted); display: block; margin-top: -0.5rem; margin-bottom: 1rem">
+                  指定 dns_address 后，sing-box 不再自动劫持派生 DNS 地址；请确认路由规则中已有 hijack-dns。
+                </small>
                 <div class="grid-2">
                   <div class="input-group">
                     <label>网卡接口名称 (interface_name)</label>
@@ -1230,6 +1275,23 @@
                 </div>
               </div>
 
+              <div
+                v-if="itemModal.itemData.type === 'direct'"
+                class="input-group"
+                style="margin-top: 1rem"
+              >
+                <label>绑定网络接口 (bind_interface)</label>
+                <input
+                  v-model="itemModal.itemData.bind_interface"
+                  type="text"
+                  class="input-control"
+                  placeholder="例如: Ethernet"
+                />
+                <small style="color: var(--text-muted)">
+                  多网卡或公司 VPN 环境可指定直连流量从哪块网卡发出；留空由系统自动选择。
+                </small>
+              </div>
+
               <!-- Selector / URLTest fields -->
               <div
                 v-if="['selector', 'urltest'].includes(itemModal.itemData.type)"
@@ -1685,7 +1747,10 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+import { addSafePrivateBypassAddresses } from "./tunRouteUtils.js";
+
+const props = defineProps({
   itemModal: { type: Object, required: true },
   configData: { type: Object, required: true },
   allOutboundTags: { type: Array, default: () => [] },
@@ -1701,6 +1766,8 @@ defineProps({
   getAddressPlaceholder: { type: Function, required: true },
 });
 
+const itemModal = toRef(props, "itemModal");
+
 const emit = defineEmits([
   "close",
   "set-mode",
@@ -1715,4 +1782,11 @@ const emit = defineEmits([
   "preset-url-change",
   "update:preset-url-select-config",
 ]);
+
+const addPrivateBypassPresets = () => {
+  itemModal.value.itemData.route_exclude_address = addSafePrivateBypassAddresses(
+    itemModal.value.itemData.route_exclude_address,
+    itemModal.value.itemData,
+  );
+};
 </script>

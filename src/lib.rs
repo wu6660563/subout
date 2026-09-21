@@ -207,9 +207,27 @@ pub async fn parse_subscription_url(url: &str) -> anyhow::Result<Vec<Outbound>> 
     Ok(outbounds)
 }
 
-/// Validates an HTTP(S) URL and requires every resolved address to be public.
-/// This keeps management actions from being used to access loopback/LAN/metadata services.
-pub async fn validate_public_http_url(raw_url: &str) -> anyhow::Result<Url> {
+pub fn redact_url_for_log(raw: &str) -> String {
+    let Ok(mut url) = Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return raw.to_string();
+    }
+
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_fragment(None);
+    if url.query().is_some() {
+        url.set_query(Some("redacted"));
+    }
+    url.to_string()
+}
+
+async fn resolve_http_target(
+    raw_url: &str,
+    allow_fake_ip: bool,
+) -> anyhow::Result<(Url, Option<SocketAddr>)> {
     let url = Url::parse(raw_url).map_err(|e| anyhow::anyhow!("URL 格式无效: {}", e))?;
     if !matches!(url.scheme(), "http" | "https") {
         anyhow::bail!("仅允许 HTTP 或 HTTPS 地址");
@@ -225,23 +243,48 @@ pub async fn validate_public_http_url(raw_url: &str) -> anyhow::Result<Url> {
         if !is_public_ip(ip) {
             anyhow::bail!("不允许访问本机、私网、链路本地或保留地址");
         }
-        return Ok(url);
+        return Ok((url, None));
     }
 
     let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-    if addresses.is_empty() || addresses.iter().any(|addr| !is_public_ip(addr.ip())) {
+    let allowed = |addr: &SocketAddr| {
+        is_public_ip(addr.ip()) || (allow_fake_ip && is_singbox_fake_ip(addr.ip()))
+    };
+    if addresses.is_empty() || addresses.iter().any(|addr| !allowed(addr)) {
         anyhow::bail!("域名解析到了本机、私网、链路本地或保留地址");
     }
-    Ok(url)
+    let selected = addresses
+        .into_iter()
+        .find(allowed)
+        .ok_or_else(|| anyhow::anyhow!("域名没有可用的公网地址"))?;
+    Ok((url, Some(selected)))
+}
+
+/// Validates an HTTP(S) URL and requires every resolved address to be public.
+/// This keeps management actions from being used to access loopback/LAN/metadata services.
+pub async fn validate_public_http_url(raw_url: &str) -> anyhow::Result<Url> {
+    Ok(resolve_http_target(raw_url, false).await?.0)
 }
 
 pub async fn get_public_http_response(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     raw_url: &str,
 ) -> anyhow::Result<reqwest::Response> {
-    let mut url = validate_public_http_url(raw_url).await?;
+    let mut target = resolve_http_target(raw_url, false).await?;
     for _ in 0..=10 {
-        let response = client.get(url.clone()).send().await?;
+        let mut builder = reqwest::Client::builder()
+            .user_agent("Subout/1.0")
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30));
+        if let Some(address) = target.1 {
+            let host = target
+                .0
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("URL 缺少主机名"))?;
+            builder = builder.resolve(host, address);
+        }
+        let pinned_client = builder.build()?;
+        let response = pinned_client.get(target.0.clone()).send().await?;
         if !response.status().is_redirection() {
             return Ok(response);
         }
@@ -250,8 +293,8 @@ pub async fn get_public_http_response(
             .get(reqwest::header::LOCATION)
             .ok_or_else(|| anyhow::anyhow!("重定向响应缺少 Location"))?
             .to_str()?;
-        let next_url = url.join(location)?;
-        url = validate_public_http_url(next_url.as_str()).await?;
+        let next_url = target.0.join(location)?;
+        target = resolve_http_target(next_url.as_str(), false).await?;
     }
     anyhow::bail!("重定向次数超过 10 次")
 }
@@ -275,45 +318,33 @@ fn is_singbox_fake_ip(ip: IpAddr) -> bool {
 /// 回环、私网、链路本地和保留地址。唯一例外是“域名”被本机 sing-box FakeIP
 /// 映射后的地址：该地址只会由 TUN 接管并再解析为该域名，不能误判为内网。
 pub async fn validate_site_test_http_url(raw_url: &str) -> anyhow::Result<Url> {
-    let url = Url::parse(raw_url).map_err(|e| anyhow::anyhow!("URL 格式无效: {}", e))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        anyhow::bail!("仅允许 HTTP 或 HTTPS 地址");
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL 缺少主机名"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow::anyhow!("URL 缺少有效端口"))?;
-
-    // 不允许用户直接把 URL 指向 FakeIP 或任何非公网 IP。
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if !is_public_ip(ip) {
-            anyhow::bail!("不允许访问本机、私网、链路本地或保留地址");
-        }
-        return Ok(url);
-    }
-
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-    if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|addr| !is_public_ip(addr.ip()) && !is_singbox_fake_ip(addr.ip()))
-    {
-        anyhow::bail!("域名解析到了本机、私网、链路本地或保留地址");
-    }
-    Ok(url)
+    Ok(resolve_http_target(raw_url, true).await?.0)
 }
 
 /// 获取网站测试响应。每次重定向都使用网站拨测校验；由此允许任意安全的公网
 /// URL，同时兼容 TUN/FakeIP，而订阅抓取仍使用更严格的公网校验。
 pub async fn get_site_test_http_response(
-    client: &reqwest::Client,
+    proxy_url: Option<&str>,
     raw_url: &str,
 ) -> anyhow::Result<reqwest::Response> {
-    let mut url = validate_site_test_http_url(raw_url).await?;
+    let mut target = resolve_http_target(raw_url, true).await?;
     for _ in 0..=10 {
-        let response = client.get(url.clone()).send().await?;
+        let mut builder = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(proxy_url) = proxy_url {
+            builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
+        }
+        if let Some(address) = target.1 {
+            let host = target
+                .0
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("URL 缺少主机名"))?;
+            builder = builder.resolve(host, address);
+        }
+        let pinned_client = builder.build()?;
+        let response = pinned_client.get(target.0.clone()).send().await?;
         if !response.status().is_redirection() {
             return Ok(response);
         }
@@ -322,8 +353,8 @@ pub async fn get_site_test_http_response(
             .get(reqwest::header::LOCATION)
             .ok_or_else(|| anyhow::anyhow!("重定向响应缺少 Location"))?
             .to_str()?;
-        let next_url = url.join(location)?;
-        url = validate_site_test_http_url(next_url.as_str()).await?;
+        let next_url = target.0.join(location)?;
+        target = resolve_http_target(next_url.as_str(), true).await?;
     }
     anyhow::bail!("重定向次数超过 10 次")
 }
@@ -365,7 +396,7 @@ pub async fn load_subscription_content(
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let content = fetch_subscription(source).await?;
-        Ok((content, format!("URL: {}", source)))
+        Ok((content, format!("URL: {}", redact_url_for_log(source))))
     } else if std::path::Path::new(source).exists() {
         let content = std::fs::read_to_string(source)?;
         Ok((content, format!("File: {}", source)))
@@ -377,6 +408,21 @@ pub async fn load_subscription_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_subscription_credentials_and_query_tokens() {
+        let redacted =
+            redact_url_for_log("https://user:password@example.com/sub?token=secret&client=desktop");
+
+        assert_eq!(redacted, "https://example.com/sub?redacted");
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn keeps_non_url_subscription_sources_unchanged() {
+        assert_eq!(redact_url_for_log("C:/rules/sub.txt"), "C:/rules/sub.txt");
+    }
 
     #[test]
     fn test_parse_userinfo_str() {

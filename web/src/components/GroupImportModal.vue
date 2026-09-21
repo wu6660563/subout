@@ -406,7 +406,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   groupImportModal: { type: Object, required: true },
   outboundGroups: { type: Array, default: () => [] },
   availableGroupsToImport: { type: Array, default: () => [] },
@@ -418,6 +420,8 @@ defineProps({
  getGroupNodesDisplay: { type: Function, required: true },
   importGroup: { type: Function, required: true },
 });
+
+const groupImportModal = toRef(props, "groupImportModal");
 
 const emit = defineEmits([
   "close",

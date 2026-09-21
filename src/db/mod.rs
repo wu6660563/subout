@@ -1,4 +1,6 @@
 use anyhow::Result;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use rand_core::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
@@ -6,10 +8,25 @@ pub mod models;
 pub use models::{ConfigHistory, Node, NodesPage, OutboundGroup, Settings, Subscription};
 
 pub fn hash_password(password: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 password hashing should not fail")
+        .to_string()
+}
+
+pub fn verify_password(password: &str, stored_hash: &str) -> bool {
+    if stored_hash.starts_with("$argon2") {
+        return PasswordHash::new(stored_hash).ok().is_some_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        });
+    }
+
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
-    let result = hasher.finalize();
-    format!("{:x}", result)
+    format!("{:x}", hasher.finalize()) == stored_hash
 }
 
 pub fn init_db(db_path: &str) -> Result<Connection> {
@@ -308,10 +325,16 @@ pub fn setup_database(conn: &Connection) -> Result<()> {
     // Bootstrap default settings if empty
     let has_settings: i64 = conn.query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))?;
     if has_settings == 0 {
-        let admin_hash = hash_password("admin");
+        // Keep the database unusable until the local user chooses the first password.
+        // This avoids shipping a default credential and avoids printing secrets to logs.
+        let admin_hash = hash_password("__setup_required__");
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('password_hash', ?)",
             [&admin_hash],
+        )?;
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('password_setup_required', 'true')",
+            [],
         )?;
     }
 
@@ -652,6 +675,7 @@ pub fn get_node_by_id(conn: &Connection, id: i64) -> Result<Option<Node>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_node_ping_result(
     conn: &Connection,
     id: i64,
@@ -1034,5 +1058,36 @@ pub fn get_config_history_detail(conn: &Connection, id: i64) -> Result<Option<Co
         }))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_password, setup_database};
+    use rusqlite::Connection;
+
+    #[test]
+    fn password_hash_is_salted_and_not_plain_sha256() {
+        let first = hash_password("test-password");
+        let second = hash_password("test-password");
+
+        assert!(first.starts_with("$argon2"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn fresh_database_requires_password_setup() {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        setup_database(&conn).expect("database setup");
+
+        let setup_required: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'password_setup_required'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("password setup flag");
+
+        assert_eq!(setup_required, "true");
     }
 }

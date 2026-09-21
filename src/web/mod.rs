@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode, header},
     response::Html,
     routing::{get, post, put},
@@ -189,6 +189,8 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
         .route("/api/dashboard/stats", get(get_dashboard_stats))
         // Auth APIs
         .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/setup-status", get(auth::setup_status))
+        .route("/api/auth/setup", post(auth::setup_password))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/status", get(auth::auth_status))
         .route("/api/auth/change-password", post(auth::change_password))
@@ -353,6 +355,7 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             "/api/simple-config/preview",
             post(simple_api::preview_simple_config),
         )
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state);
 
     // Determine if port is explicitly configured

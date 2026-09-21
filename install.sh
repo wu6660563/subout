@@ -678,7 +678,7 @@ echo -e "${GREEN}======================================================${NC}"
 echo -e "${GREEN}🎉 subout 安装成功！${NC}"
 echo -e "${GREEN}======================================================${NC}"
 echo -e "📍 Web 管理面板地址 : ${CYAN}${BOLD}http://127.0.0.1:${PORT}${NC}"
-echo -e "🔑 默认登录密码     : ${BOLD}admin${NC} (首次登录后建议修改)"
+echo -e "🔑 首次启动          : ${BOLD}打开面板后设置管理员密码${NC}"
 echo -e "💾 持久化数据目录   : ${BOLD}${DATA_DIR}${NC}"
 echo -e "📝 系统日志目录     : ${BOLD}${LOG_DIR}${NC}"
 echo

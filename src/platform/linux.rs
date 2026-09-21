@@ -685,10 +685,10 @@ impl PlatformStrategy for LinuxPlatform {
             Some("gsettings") => {
                 let state = save_gnome_proxy_state();
                 let lock = GNOME_PROXY_STATE.get_or_init(|| Mutex::new(None));
-                if let Ok(mut saved) = lock.lock() {
-                    if saved.is_none() {
-                        *saved = state;
-                    }
+                if let Ok(mut saved) = lock.lock()
+                    && saved.is_none()
+                {
+                    *saved = state;
                 }
                 let port = port.to_string();
                 let _ = gsettings_set("mode", "manual");

@@ -491,15 +491,7 @@ impl SingBoxServiceManager {
     }
 
     pub async fn load_saved_sudo_pass(&self) {
-        if let Some(ref path) = *self.db_path.read().await
-            && let Ok(conn) = rusqlite::Connection::open(path)
-            && let Ok(Some(pass)) = crate::db::get_setting(&conn, "sudo_password")
-        {
-            let trimmed = pass.trim();
-            if !trimmed.is_empty() {
-                *self.cached_sudo_pass.write().await = Some(trimmed.to_string());
-            }
-        }
+        self.delete_legacy_saved_sudo_pass().await;
     }
 
     pub async fn save_sudo_pass(&self, pass: &str) {
@@ -509,10 +501,13 @@ impl SingBoxServiceManager {
             return;
         }
         *self.cached_sudo_pass.write().await = Some(trimmed.to_string());
+    }
+
+    async fn delete_legacy_saved_sudo_pass(&self) {
         if let Some(ref path) = *self.db_path.read().await
             && let Ok(conn) = rusqlite::Connection::open(path)
         {
-            let _ = crate::db::update_setting(&conn, "sudo_password", trimmed);
+            let _ = crate::db::delete_setting(&conn, "sudo_password");
         }
     }
 
@@ -1710,6 +1705,11 @@ impl SingBoxServiceManager {
 
         let platform = crate::platform::current_platform();
 
+        let conflicts = self.find_external_singbox_processes().await;
+        if !is_authorized_external_process_pid(&conflicts, pid) {
+            return Err(anyhow!("拒绝终止未被识别为 sing-box 的进程 (PID: {})", pid));
+        }
+
         if !platform.is_pid_alive(pid) {
             self.append_log(&format!("外部进程 (PID: {}) 已不再运行", pid))
                 .await;
@@ -1955,6 +1955,10 @@ pub fn detect_conflicting_singbox_processes(
         managed_pid,
         &SingBoxServiceManager::get_running_config_path(),
     )
+}
+
+pub fn is_authorized_external_process_pid(conflicts: &[ConflictingProcessInfo], pid: u32) -> bool {
+    conflicts.iter().any(|process| process.pid == pid)
 }
 
 pub fn get_inbounds_summary_from_config(config_path: &std::path::Path) -> Option<String> {
@@ -2537,11 +2541,11 @@ mod tests {
         mgr.save_sudo_pass("my_secret_pass").await;
         assert!(mgr.has_saved_sudo_pass().await);
 
-        // Create new manager instance to verify persistent loading from DB
+        // Sudo credentials are intentionally process-lifetime only and must not be persisted.
         let mgr2 = SingBoxServiceManager::new();
         mgr2.set_db_path(&db_path).await;
         mgr2.load_saved_sudo_pass().await;
-        assert!(mgr2.has_saved_sudo_pass().await);
+        assert!(!mgr2.has_saved_sudo_pass().await);
 
         // Clear password
         mgr2.clear_saved_sudo_pass().await;
@@ -2554,6 +2558,19 @@ mod tests {
         assert!(!mgr3.has_saved_sudo_pass().await);
 
         let _ = std::fs::remove_file(&db_file);
+    }
+
+    #[test]
+    fn only_detected_singbox_processes_are_authorized_for_termination() {
+        let conflicts = vec![ConflictingProcessInfo {
+            pid: 4242,
+            name: "sing-box".to_string(),
+            cmdline: Some("sing-box run -c config.json".to_string()),
+            exe_path: Some("C:/ProgramData/Subout/bin/sing-box.exe".to_string()),
+        }];
+
+        assert!(is_authorized_external_process_pid(&conflicts, 4242));
+        assert!(!is_authorized_external_process_pid(&conflicts, 4243));
     }
 
     #[tokio::test]

@@ -86,7 +86,10 @@
 </template>
 
 <script setup>
-defineProps({
+import { toRef } from "vue";
+
+const props = defineProps({
   configData: { type: Object, required: true },
 });
+const configData = toRef(props, "configData");
 </script>

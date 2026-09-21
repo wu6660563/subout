@@ -257,6 +257,31 @@ pub async fn batch_delete_nodes(
 }
 
 pub fn validate_json(_section: &str, _value: &Value) -> Result<(), String> {
+    let obj = _value
+        .as_object()
+        .ok_or_else(|| "节点配置必须是对象".to_string())?;
+    let node_type = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "节点配置缺少 type 字段".to_string())?;
+    const NODE_TYPES: &[&str] = &[
+        "anytls",
+        "hysteria",
+        "hysteria2",
+        "http",
+        "shadowsocks",
+        "shadowtls",
+        "socks",
+        "ssh",
+        "trojan",
+        "tuic",
+        "vless",
+        "vmess",
+        "wireguard",
+    ];
+    if !NODE_TYPES.contains(&node_type) {
+        return Err(format!("不支持的 sing-box 节点类型: {}", node_type));
+    }
     Ok(())
 }
 
@@ -272,6 +297,10 @@ pub fn validate_node_json(
     let obj = val
         .as_object()
         .ok_or_else(|| "JSON 必须是对象格式".to_string())?;
+
+    if tag.trim().is_empty() || server.trim().is_empty() || port == 0 {
+        return Err("节点名称、服务器地址和端口不能为空".to_string());
+    }
 
     let json_tag = obj
         .get("tag")
@@ -537,31 +566,31 @@ async fn probe_node_urls(
         let mut result = None;
         let mut geo = None;
         if ready {
-            if let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{}", port))
-                && let Ok(client) = reqwest::Client::builder()
-                    .proxy(proxy)
-                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(Duration::from_secs(10))
-                    .build()
+            let proxy_url = format!("http://127.0.0.1:{}", port);
+            let start = Instant::now();
+            if let Ok(resp) = crate::get_site_test_http_response(Some(&proxy_url), &target_url).await {
+                let status = resp.status().as_u16();
+                if status < 400 || status == 403 || status == 405 || status == 429 {
+                    let body = resp.text().await.unwrap_or_default();
+                    result = Some((status, start.elapsed().as_millis() as u64, body));
+                }
+                if include_geo
+                    && let Ok(geo_resp) = crate::get_site_test_http_response(
+                        Some(&proxy_url),
+                        "https://ipwho.is/",
+                    )
+                    .await
                 {
-                    let start = Instant::now();
-                    if let Ok(resp) = crate::get_site_test_http_response(&client, &target_url).await {
-                        let status = resp.status().as_u16();
-                        if status < 400 || status == 403 || status == 405 || status == 429 {
-                            let body = resp.text().await.unwrap_or_default();
-                            result = Some((status, start.elapsed().as_millis() as u64, body));
-                        }
-                        if include_geo
-                            && let Ok(geo_resp) = crate::get_site_test_http_response(&client, "https://ipwho.is/").await
-                        {
-                            let geo_status = geo_resp.status().as_u16();
-                            if geo_status < 400 || geo_status == 403 || geo_status == 405 || geo_status == 429 {
-                                geo = parse_geo_response(&geo_resp.text().await.unwrap_or_default());
-                            }
-                        }
+                    let geo_status = geo_resp.status().as_u16();
+                    if geo_status < 400
+                        || geo_status == 403
+                        || geo_status == 405
+                        || geo_status == 429
+                    {
+                        geo = parse_geo_response(&geo_resp.text().await.unwrap_or_default());
                     }
                 }
+            }
         }
 
         if result.is_some() || geo.is_some() {
@@ -595,20 +624,18 @@ async fn test_node_geo_only(raw_json: String, sem: Arc<Semaphore>) -> Option<Geo
         false,
     )
     .await
+        && let Ok(value) = serde_json::from_str::<Value>(&ip_body)
+        && let Some(ip) = value.get("ip").and_then(Value::as_str)
+        && let Some((Some((_, _, body)), _)) = probe_node_urls(
+            raw_json.clone(),
+            format!("https://ipapi.co/{}/json/", ip),
+            sem.clone(),
+            false,
+        )
+        .await
+        && let Some(geo) = parse_geo_response(&body)
     {
-        if let Ok(value) = serde_json::from_str::<Value>(&ip_body)
-            && let Some(ip) = value.get("ip").and_then(Value::as_str)
-            && let Some((Some((_, _, body)), _)) = probe_node_urls(
-                raw_json.clone(),
-                format!("https://ipapi.co/{}/json/", ip),
-                sem.clone(),
-                false,
-            )
-            .await
-            && let Some(geo) = parse_geo_response(&body)
-        {
-            return Some(geo);
-        }
+        return Some(geo);
     }
 
     // Different proxy providers may block one public geo service. Try the
@@ -891,9 +918,9 @@ pub struct SiteTestResponse {
     pub error: Option<String>,
 }
 
-async fn try_fetch_url(client: &reqwest::Client, url: &str) -> Option<(u16, u64)> {
+async fn try_fetch_url(proxy_url: Option<&str>, url: &str) -> Option<(u16, u64)> {
     let start = Instant::now();
-    if let Ok(resp) = crate::get_site_test_http_response(client, url).await {
+    if let Ok(resp) = crate::get_site_test_http_response(proxy_url, url).await {
         let status = resp.status().as_u16();
         let elapsed = start.elapsed().as_millis() as u64;
         Some((status, elapsed))
@@ -929,15 +956,8 @@ pub async fn test_site_reachability(
         }));
     }
 
-    let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
     // 1. Try standard client (uses environment proxy / TUN mode / direct sockets)
-    if let Ok(client) = reqwest::Client::builder()
-        .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(8))
-        .build()
-        && let Some((status, elapsed)) = try_fetch_url(&client, &url).await
+    if let Some((status, elapsed)) = try_fetch_url(None, &url).await
     {
         let success = status < 400 || status == 403 || status == 405 || status == 429;
         return Ok(Json(SiteTestResponse {
@@ -963,14 +983,7 @@ pub async fn test_site_reachability(
     ];
 
     for proxy_str in &candidate_proxy_urls {
-        if let Ok(proxy) = reqwest::Proxy::all(*proxy_str)
-            && let Ok(client) = reqwest::Client::builder()
-                .proxy(proxy)
-                .user_agent(user_agent)
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(6))
-                .build()
-            && let Some((status, elapsed)) = try_fetch_url(&client, &url).await
+        if let Some((status, elapsed)) = try_fetch_url(Some(proxy_str), &url).await
         {
             let success = status < 400 || status == 403 || status == 405 || status == 429;
             return Ok(Json(SiteTestResponse {
@@ -994,7 +1007,7 @@ pub async fn test_site_reachability(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_geo_response;
+    use super::{parse_geo_response, validate_node_json};
 
     #[test]
     fn parses_ipwho_response() {
@@ -1020,5 +1033,18 @@ mod tests {
     fn rejects_unsuccessful_or_non_geo_response() {
         assert!(parse_geo_response(r#"{"success":false}"#).is_none());
         assert!(parse_geo_response(r#"{"status":"forbidden"}"#).is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_node_protocol() {
+        let result = validate_node_json(
+            "test",
+            "not-a-singbox-protocol",
+            "127.0.0.1",
+            443,
+            r#"{"tag":"test","type":"not-a-singbox-protocol","server":"127.0.0.1","server_port":443}"#,
+        );
+
+        assert!(result.is_err());
     }
 }

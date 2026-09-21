@@ -68,4 +68,52 @@ describe("ConfigItemEditorModal", () => {
     await saveButton.trigger("click");
     expect(wrapper.emitted("save")).toHaveLength(1);
   });
+
+  it("adds safe private bypass presets for a TUN inbound", async () => {
+    const itemModal = createItemModal();
+    itemModal.itemType = "inbound";
+    itemModal.itemData = {
+      type: "tun",
+      address: ["172.19.0.1/30"],
+      dns_address: ["172.19.0.2"],
+      route_exclude_address: [],
+    };
+    const wrapper = mount(ConfigItemEditorModal, {
+      props: {
+        itemModal,
+        configData: { dns: { servers: [] } },
+        allOutboundTags: ["direct"],
+        browserPresets: [],
+        isLinux: false,
+        isApplePlatform: false,
+        isWindowsPlatform: true,
+        processNamePlaceholder: "进程名",
+        processPathPlaceholder: "进程路径",
+        presetUrlSelectConfig: "",
+        getAddressPlaceholder: () => "服务器地址",
+      },
+    });
+
+    await wrapper.findAll("button").find((button) => button.text().includes("添加常用内网")).trigger("click");
+
+    expect(itemModal.itemData.route_exclude_address).toEqual([
+      "10.0.0.0/8",
+      "192.168.0.0/16",
+      "100.64.0.0/10",
+      "169.254.0.0/16",
+    ]);
+  });
+
+  it("edits a direct outbound network interface binding", async () => {
+    const itemModal = createItemModal();
+    itemModal.itemType = "outbound";
+    itemModal.itemData = { tag: "direct", type: "direct" };
+    const wrapper = mount(ConfigItemEditorModal, {
+      props: { itemModal, configData: { dns: { servers: [] } }, allOutboundTags: [], browserPresets: [], isLinux: false, isApplePlatform: false, isWindowsPlatform: true, processNamePlaceholder: "", processPathPlaceholder: "", presetUrlSelectConfig: "", getAddressPlaceholder: () => "" },
+    });
+
+    const input = wrapper.find('input[placeholder="例如: Ethernet"]');
+    await input.setValue("Ethernet");
+    expect(itemModal.itemData.bind_interface).toBe("Ethernet");
+  });
 });
