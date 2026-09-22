@@ -28,36 +28,46 @@
       <span v-if="earliestExpiry" class="audit-expiry">最早记录约 {{ earliestExpiry }} 到期</span>
     </div>
 
-    <div class="audit-toolbar">
-      <input v-model="filters.process" class="input-control" placeholder="检索进程名、PID 或路径" />
-      <input v-model="filters.target" class="input-control" placeholder="检索域名或 IP" />
-      <input v-model="filters.node" class="input-control" placeholder="检索节点" />
-      <select v-model="filters.protocol" class="input-control">
-        <option value="">全部协议</option>
-        <option value="TCP">TCP</option>
-        <option value="UDP">UDP</option>
-      </select>
-      <label class="audit-check"><input v-model="autoRefresh" type="checkbox" /> 实时刷新</label>
-      <select v-model="sortField" class="input-control audit-sort">
-        <option value="last_seen">按最后访问</option>
-        <option value="first_seen">按首次发现</option>
-        <option value="process">按进程</option>
-        <option value="node">按节点</option>
-      </select>
-      <button class="btn btn-secondary btn-sm" @click="toggleSortDirection">{{ sortDirection === 'desc' ? '降序' : '升序' }}</button>
-      <button class="btn btn-secondary btn-sm" @click="exportFilteredEvents">导出 JSON</button>
+    <div class="tabs audit-tabs">
+      <div class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">连接日志</div>
+      <div class="tab" :class="{ active: activeTab === 'route' }" @click="activeTab = 'route'">路由测试</div>
     </div>
 
+    <div v-show="activeTab === 'route'" class="audit-tab-panel">
     <div class="audit-route-test">
       <strong>路由测试</strong>
-      <input v-model="routeTest.domain" class="input-control" placeholder="域名或 IP，例如 gitlab.mtrcloud.cn" />
-      <input v-model="routeTest.resolvedIp" class="input-control" placeholder="可选：解析后 IP，例如 10.16.228.100" />
-      <input v-model.number="routeTest.port" class="input-control" type="number" placeholder="端口" />
-      <input v-model="routeTest.processName" class="input-control" placeholder="可选：进程名，例如 msedge.exe" />
-      <input v-model="routeTest.processPath" class="input-control" placeholder="可选：进程路径，例如 C:/Program Files/SDC/browser.exe" />
-      <select v-model="routeTest.network" class="input-control"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
-      <button class="btn btn-secondary btn-sm" :disabled="routeTestLoading" @click="runRouteTest">{{ routeTestLoading ? '测试中...' : '测试路由' }}</button>
-      <span v-if="routeTestError" class="audit-error">{{ routeTestError }}</span>
+      <table class="audit-route-form">
+        <tbody>
+          <tr>
+            <td><label for="audit-route-domain">域名或 IP</label></td>
+            <td><input id="audit-route-domain" v-model="routeTest.domain" class="input-control" placeholder="例如 gitlab.mtrcloud.cn" /></td>
+          </tr>
+          <tr>
+            <td><label for="audit-route-resolved-ip">解析后 IP（可选）</label></td>
+            <td><input id="audit-route-resolved-ip" v-model="routeTest.resolvedIp" class="input-control" placeholder="例如 10.16.228.100" /></td>
+          </tr>
+          <tr>
+            <td><label for="audit-route-port">端口</label></td>
+            <td><input id="audit-route-port" v-model.number="routeTest.port" class="input-control" type="number" placeholder="端口" /></td>
+          </tr>
+          <tr>
+            <td><label for="audit-route-process-name">进程名（可选）</label></td>
+            <td><input id="audit-route-process-name" v-model="routeTest.processName" class="input-control" placeholder="例如 msedge.exe" /></td>
+          </tr>
+          <tr>
+            <td><label for="audit-route-process-path">进程路径（可选）</label></td>
+            <td><input id="audit-route-process-path" v-model="routeTest.processPath" class="input-control" placeholder="例如 C:/Program Files/SDC/browser.exe" /></td>
+          </tr>
+          <tr>
+            <td><label for="audit-route-network">协议</label></td>
+            <td><select id="audit-route-network" v-model="routeTest.network" class="input-control"><option value="tcp">TCP</option><option value="udp">UDP</option></select></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="audit-route-actions">
+        <button class="btn btn-secondary btn-sm" :disabled="routeTestLoading" @click="runRouteTest">{{ routeTestLoading ? '测试中...' : '测试路由' }}</button>
+        <span v-if="routeTestError" class="audit-error">{{ routeTestError }}</span>
+      </div>
     </div>
     <div v-if="routeTestResult" class="audit-route-result" :class="routeTestResult.routeKind === 'DIRECT' ? 'direct' : 'proxy'">
       <strong>结果：{{ routeTestResult.routeKind === 'DIRECT' ? 'Direct（直连）' : '代理' }}</strong>
@@ -82,6 +92,28 @@
         <small v-if="tunStatusWarnings.length" class="audit-error">配置提示：<span v-for="warning in tunStatusWarnings" :key="warning">{{ warning }} </span></small>
       </template>
       <small v-if="tunStatusError" class="audit-error">{{ tunStatusError }}</small>
+    </div>
+    </div>
+
+    <div v-show="activeTab === 'logs'" class="audit-tab-panel">
+    <div class="audit-toolbar">
+      <input v-model="filters.process" class="input-control" placeholder="检索进程名、PID 或路径" />
+      <input v-model="filters.target" class="input-control" placeholder="检索域名或 IP" />
+      <input v-model="filters.node" class="input-control" placeholder="检索节点" />
+      <select v-model="filters.protocol" class="input-control">
+        <option value="">全部协议</option>
+        <option value="TCP">TCP</option>
+        <option value="UDP">UDP</option>
+      </select>
+      <label class="audit-check"><input v-model="autoRefresh" type="checkbox" /> 实时刷新</label>
+      <select v-model="sortField" class="input-control audit-sort">
+        <option value="last_seen">按最后访问</option>
+        <option value="first_seen">按首次发现</option>
+        <option value="process">按进程</option>
+        <option value="node">按节点</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" @click="toggleSortDirection">{{ sortDirection === 'desc' ? '降序' : '升序' }}</button>
+      <button class="btn btn-secondary btn-sm" @click="exportFilteredEvents">导出 JSON</button>
     </div>
 
     <div v-if="errorMessage" class="audit-error">{{ errorMessage }}</div>
@@ -129,6 +161,7 @@
         </tbody>
       </table>
     </div>
+    </div>
   </div>
 </template>
 
@@ -141,6 +174,7 @@ import { getTunRiskWarnings } from "./tunStatusUtils.js";
 
 const events = ref([]);
 const currentEvents = ref([]);
+const activeTab = ref("logs");
 const retentionMinutes = ref(20);
 const recordingEnabled = ref(true);
 const autoRefresh = ref(true);
@@ -281,6 +315,7 @@ function formatTunValues(value) {
 }
 
 async function loadTunStatus() {
+  activeTab.value = "route";
   tunStatusLoading.value = true;
   tunStatusError.value = "";
   try {

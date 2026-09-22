@@ -1359,6 +1359,16 @@ pre.code-block {
 .audit-toolbar .input-control { min-width: 150px; flex: 1 1 150px; }
 .audit-toolbar .audit-sort { flex: 0 1 145px; }
 .audit-count { margin-left: auto; color: var(--text-muted); font-size: 0.82rem; }
+.audit-tabs { margin-bottom: 0; padding-bottom: 0.5rem; flex-shrink: 0; }
+.audit-tab-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 0.75rem; }
+.audit-route-test { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+.audit-route-form { border-collapse: collapse; }
+.audit-route-form td { padding: 0.3rem 0.5rem; vertical-align: middle; }
+.audit-route-form td:first-child { width: 150px; text-align: right; color: var(--text-muted); font-size: 0.82rem; white-space: nowrap; }
+.audit-route-form .input-control { width: 100%; min-width: 260px; box-sizing: border-box; }
+.audit-route-form input[type="number"].input-control { max-width: 120px; }
+.audit-route-form select.input-control { max-width: 160px; }
+.audit-route-actions { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .audit-error, .audit-new-banner { padding: 0.65rem 0.8rem; border-radius: var(--radius-sm); background: rgba(234, 179, 8, 0.1); color: #eab308; }
 .audit-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-card); }
 .audit-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }

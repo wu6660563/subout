@@ -128,11 +128,48 @@ describe("ConnectionAuditView", () => {
     const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
     const wrapper = mount(ConnectionAuditView);
     await flushPromises();
-    await wrapper.get('input[placeholder^="域名或 IP"]').setValue("gitlab.mtrcloud.cn");
-    await wrapper.get('input[placeholder^="可选：解析后 IP"]').setValue("10.16.228.100");
+    await wrapper.get("#audit-route-domain").setValue("gitlab.mtrcloud.cn");
+    await wrapper.get("#audit-route-resolved-ip").setValue("10.16.228.100");
     await wrapper.findAll("button").find((button) => button.text() === "测试路由").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("TUN 接管判断：已绕过 TUN");
+    wrapper.unmount();
+  });
+
+  it("shows the logs tab by default and switches panels through the tab buttons", async () => {
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    const tabButtons = wrapper.findAll(".audit-tabs .tab");
+    expect(tabButtons.map((button) => button.text())).toEqual(["连接日志", "路由测试"]);
+    expect(tabButtons[0].classes()).toContain("active");
+    const panels = wrapper.findAll(".audit-tab-panel");
+    expect(panels).toHaveLength(2);
+    const routePanel = wrapper.find(".audit-route-test").element.closest(".audit-tab-panel");
+    const logsPanel = wrapper.find(".audit-table-wrap").element.closest(".audit-tab-panel");
+    expect(routePanel.style.display).toBe("none");
+    expect(logsPanel.style.display).not.toBe("none");
+    await tabButtons[1].trigger("click");
+    expect(routePanel.style.display).not.toBe("none");
+    expect(logsPanel.style.display).toBe("none");
+    wrapper.unmount();
+  });
+
+  it("jumps to the route tab when the header asks for TUN status", async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/settings")) return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, recording_enabled: true }) });
+      if (String(url).includes("/config/generated")) return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        inbounds: [{ tag: "tun-in", type: "tun", auto_route: true }],
+      }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ retention_minutes: 20, events: [] }) });
+    });
+    const { default: ConnectionAuditView } = await import("./ConnectionAuditView.vue");
+    const wrapper = mount(ConnectionAuditView);
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "查看 TUN 状态").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".audit-tabs .tab")[1].classes()).toContain("active");
+    expect(wrapper.find(".audit-route-test").element.closest(".audit-tab-panel").style.display).not.toBe("none");
     wrapper.unmount();
   });
 
