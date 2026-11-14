@@ -559,10 +559,23 @@ $SUDO mkdir -p "$RUNTIME_DIR"
 
 if [[ "$TARGET_OS" == "linux" ]]; then
     $SUDO chown -R subout:subout "$DATA_DIR" "$LOG_DIR" "$RUNTIME_DIR" 2>/dev/null || true
-    $SUDO chmod 755 "$DATA_DIR" "$LOG_DIR" "$RUNTIME_DIR"
+    # 0700: the data directory holds subscription tokens, node credentials and the
+    # generated sing-box config. The platform defaults (/var/lib, /var/log) are
+    # world-readable, so 755 would expose every proxy credential to every local user.
+    $SUDO chmod 700 "$DATA_DIR" "$LOG_DIR" "$RUNTIME_DIR"
+    $SUDO find "$DATA_DIR" -maxdepth 1 -type d -exec chmod 700 {} + 2>/dev/null || true
 elif [[ "$TARGET_OS" == "darwin" ]]; then
-    $SUDO chmod 755 "$DATA_DIR" "$LOG_DIR" "$RUNTIME_DIR"
+    $SUDO chmod 700 "$DATA_DIR" "$LOG_DIR" "$RUNTIME_DIR"
+    $SUDO find "$DATA_DIR" -maxdepth 1 -type d -exec chmod 700 {} + 2>/dev/null || true
 fi
+
+# Tighten an existing database/config from earlier versions (upgrades, not just fresh installs).
+if [[ -f "$DATA_DIR/subout.db" ]]; then
+    $SUDO chmod 600 "$DATA_DIR/subout.db" 2>/dev/null || true
+fi
+for f in "$DATA_DIR"/generated/*.json; do
+    [[ -f "$f" ]] && $SUDO chmod 600 "$f" 2>/dev/null || true
+done
 
 # Check sing-box existence in system
 if command -v sing-box >/dev/null 2>&1; then

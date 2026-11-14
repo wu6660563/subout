@@ -31,7 +31,31 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
 
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
+
+    // The database stores subscription URLs (with tokens), node credentials and password
+    // hashes; keep it owner-only instead of the umask default (0644 → readable by every
+    // local user). WAL/SHM siblings are created lazily, so cover them too.
+    let db_file = std::path::Path::new(db_path);
+    crate::paths::restrict_file(db_file);
+    for suffix in ["-wal", "-shm"] {
+        let sibling = std::path::PathBuf::from(format!("{}{}", db_path, suffix));
+        if sibling.exists() {
+            crate::paths::restrict_file(&sibling);
+        }
+    }
+
     setup_database(&conn)?;
+
+    // `Connection::open` created the file before our chmod; re-apply in case a migration
+    // above recreated it, and cover the WAL files that now exist.
+    crate::paths::restrict_file(db_file);
+    for suffix in ["-wal", "-shm"] {
+        let sibling = std::path::PathBuf::from(format!("{}{}", db_path, suffix));
+        if sibling.exists() {
+            crate::paths::restrict_file(&sibling);
+        }
+    }
+
     Ok(conn)
 }
 

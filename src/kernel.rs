@@ -269,6 +269,60 @@ pub fn extract_archive(
     Ok(target_path)
 }
 
+/// Kernel archives are ~15-40 MB. Anything near this ceiling is not a real kernel, and
+/// the daemon must not buffer it (the download is held in memory before extraction).
+const MAX_KERNEL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Upper bound for the initial in-memory buffer so a spoofed Content-Length cannot make us
+/// reserve hundreds of megabytes up front.
+const MAX_KERNEL_PREALLOC_BYTES: u64 = 64 * 1024 * 1024;
+
+const MAX_KERNEL_REDIRECTS: usize = 10;
+
+/// Fetches the kernel archive, following redirects manually so **every** hop is HTTPS.
+///
+/// The default client policy would happily follow a redirect to `http://`, and the
+/// extracted binary is executed as SYSTEM/root, so a hijacked mirror could replace the
+/// kernel with arbitrary code.
+async fn fetch_kernel_response(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response> {
+    let mut current = url.to_string();
+
+    for _ in 0..=MAX_KERNEL_REDIRECTS {
+        let parsed = url::Url::parse(&current).map_err(|e| anyhow!("内核下载地址无效: {}", e))?;
+
+        if parsed.scheme() != "https" {
+            return Err(anyhow!("内核下载仅允许 HTTPS，已拒绝: {}", parsed));
+        }
+
+        let response = client
+            .get(parsed.clone())
+            .send()
+            .await
+            .map_err(|e| anyhow!("发起内核下载请求失败: {}", e))?;
+
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| anyhow!("内核下载重定向响应缺少 Location"))?
+            .to_str()
+            .map_err(|_| anyhow!("内核下载重定向地址无效"))?;
+
+        current = parsed
+            .join(location)
+            .map_err(|e| anyhow!("内核下载重定向地址无效: {}", e))?
+            .to_string();
+    }
+
+    Err(anyhow!("内核下载重定向次数超过 {} 次", MAX_KERNEL_REDIRECTS))
+}
+
 pub async fn download_and_install_kernel(
     status_lock: Arc<RwLock<KernelDownloadStatus>>,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -288,9 +342,10 @@ pub async fn download_and_install_kernel(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
-    let response = match client.get(target.url).send().await {
+    let response = match fetch_kernel_response(&client, target.url).await {
         Ok(res) => {
             if !res.status().is_success() {
                 let err_msg = format!("下载失败，HTTP 状态码: {}", res.status());
@@ -311,6 +366,18 @@ pub async fn download_and_install_kernel(
     };
 
     let total_size = response.content_length().unwrap_or(0);
+
+    if total_size > MAX_KERNEL_BYTES {
+        let err_msg = format!(
+            "内核文件异常过大 ({} 字节)，已拒绝下载",
+            total_size
+        );
+        let mut st = status_lock.write().await;
+        st.status = "error".to_string();
+        st.error = Some(err_msg.clone());
+        return Err(anyhow!(err_msg));
+    }
+
     {
         let mut st = status_lock.write().await;
         st.total_bytes = total_size;
@@ -320,7 +387,7 @@ pub async fn download_and_install_kernel(
     use futures_util::StreamExt;
 
     let mut downloaded_data = Vec::with_capacity(if total_size > 0 {
-        total_size as usize
+        total_size.min(MAX_KERNEL_PREALLOC_BYTES) as usize
     } else {
         15 * 1024 * 1024
     });
@@ -347,8 +414,21 @@ pub async fn download_and_install_kernel(
             }
         };
 
-        downloaded_bytes += chunk.len() as u64;
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+
+        if downloaded_bytes > MAX_KERNEL_BYTES {
+            let err_msg = format!(
+                "内核文件超过 {} 字节上限，已中止下载",
+                MAX_KERNEL_BYTES
+            );
+            let mut st = status_lock.write().await;
+            st.status = "error".to_string();
+            st.error = Some(err_msg.clone());
+            return Err(anyhow!(err_msg));
+        }
+
         downloaded_data.extend_from_slice(&chunk);
+
 
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(last_speed_time).as_secs_f64();
@@ -428,6 +508,25 @@ pub async fn download_and_install_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn kernel_download_rejects_plaintext_http() {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        // Rejected before any connection is made: the archive is executed as root/SYSTEM,
+        // so a downgrade to plaintext must never be accepted.
+        let error = fetch_kernel_response(&client, "http://127.0.0.1:1/sing-box.zip")
+            .await
+            .expect_err("plaintext download must be rejected");
+
+        assert!(
+            error.to_string().contains("仅允许 HTTPS"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn test_supported_targets_count_and_urls() {

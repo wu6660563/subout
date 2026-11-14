@@ -1,8 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, StatusCode, header},
-    response::Html,
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{get, post, put},
 };
 use rusqlite::Connection;
@@ -108,6 +109,106 @@ fn open_default_browser(port: u16) {
     }
 }
 
+// ------------------------------------------------------------------------------
+// Loopback authority guard
+// ------------------------------------------------------------------------------
+
+/// Reject requests whose `Host` is not the loopback authority the panel was opened on.
+///
+/// Binding to 127.0.0.1 does not stop DNS rebinding: a malicious page can point its own
+/// hostname at 127.0.0.1 and become same-origin with the panel, which would let it drive
+/// the API (including the unauthenticated first-run `/api/auth/setup`) and take over a
+/// root/SYSTEM daemon. Pinning the accepted authority keeps every request on the address
+/// the user actually typed.
+async fn guard_local_authority(State(port): State<u16>, request: Request, next: Next) -> Response {
+    if !is_local_authority(request.headers(), port) {
+        // Helpful for the (legitimate) case of opening the panel on the wrong port or
+        // hostname; nothing here is sensitive.
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "forbidden: 请通过 http://127.0.0.1:{} 访问面板 (仅接受本机回环地址)\n",
+                port
+            ),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
+fn is_local_authority(headers: &HeaderMap, port: u16) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    if !authority_is_loopback(host, port) {
+        return false;
+    }
+
+    // Same-origin XHR/fetch sends `Origin` for non-GET requests; a mismatch means the
+    // request came from another site (rebinding or a stray proxy).
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let authority = origin
+            .split_once("://")
+            .map_or(origin, |(_scheme, rest)| rest);
+
+        if !authority_is_loopback(authority, port) {
+            return false;
+        }
+    }
+
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        && site.eq_ignore_ascii_case("cross-site")
+    {
+        return false;
+    }
+
+    true
+}
+
+/// `127.0.0.1`, `localhost` or `[::1]`, optionally with the panel's port.
+fn authority_is_loopback(authority: &str, port: u16) -> bool {
+    let authority = authority.trim();
+
+    if authority.is_empty() {
+        return false;
+    }
+
+    let (host, port_part) = if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6 literal: "[::1]" or "[::1]:1234".
+        let Some((host, tail)) = rest.split_once(']') else {
+            return false;
+        };
+
+        (format!("[{host}]"), tail.trim_start_matches(':').to_string())
+    } else if let Some((host, port_part)) = authority.rsplit_once(':')
+        && !port_part.is_empty()
+        && port_part.chars().all(|ch| ch.is_ascii_digit())
+    {
+        (host.to_string(), port_part.to_string())
+    } else {
+        (authority.to_string(), String::new())
+    };
+
+    if !matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "[::1]"
+    ) {
+        return false;
+    }
+
+    port_part.is_empty() || port_part.parse::<u16>() == Ok(port)
+}
+
 pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
     // Determine database path and ensure directories
     let db_path_buf = crate::paths::AppPaths::get().initialize_db_path()?;
@@ -136,6 +237,12 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
     let service_manager = Arc::new(crate::service::SingBoxServiceManager::new());
     service_manager.set_db_path(&db_path).await;
     service_manager.load_saved_sudo_pass().await;
+
+    // A stale proxy left by a crashed instance points every browser at a dead port, which
+    // looks like "the internet is broken". Roll it back before anything else runs.
+    if let Err(err) = crate::platform::current_platform().restore_stale_system_proxy(None) {
+        eprintln!("[Init] 恢复上次异常退出遗留的系统代理失败: {}", err);
+    }
     let auth_disabled =
         db::get_setting(&_conn, "auth_disabled")?.is_some_and(|value| value == "true");
 
@@ -181,6 +288,27 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             }
         }
     });
+
+    // Resolve the listening port before building the router: the loopback authority
+    // guard needs the port the panel actually bound (the configured one may be busy).
+    let mut configured_port = None;
+    if let Some(p) = port_opt {
+        configured_port = Some(p);
+    } else if let Ok(port_env) = std::env::var("PORT") {
+        if let Ok(p) = port_env.parse::<u16>() {
+            configured_port = Some(p);
+        } else {
+            return Err(format!(
+                "Error: Invalid port number '{}' in PORT environment variable.",
+                port_env
+            )
+            .into());
+        }
+    }
+
+    let start_port = configured_port.unwrap_or(1234);
+    let listener = bind_available_listener(start_port).await?;
+    let actual_port = listener.local_addr()?.port();
 
     let app = Router::new()
         // Front-end UI
@@ -364,27 +492,12 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             post(simple_api::cache_rulesets),
         )
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            actual_port,
+            guard_local_authority,
+        ))
         .with_state(state);
 
-    // Determine if port is explicitly configured
-    let mut configured_port = None;
-    if let Some(p) = port_opt {
-        configured_port = Some(p);
-    } else if let Ok(port_env) = std::env::var("PORT") {
-        if let Ok(p) = port_env.parse::<u16>() {
-            configured_port = Some(p);
-        } else {
-            return Err(format!(
-                "Error: Invalid port number '{}' in PORT environment variable.",
-                port_env
-            )
-            .into());
-        }
-    }
-
-    let start_port = configured_port.unwrap_or(1234);
-    let listener = bind_available_listener(start_port).await?;
-    let actual_port = listener.local_addr()?.port();
     println!("[Server] Subout Panel running on {}", web_url(actual_port));
     if actual_port != start_port {
         println!(
@@ -575,5 +688,87 @@ mod tests {
         };
 
         assert!(check_auth(&state, &HeaderMap::new()).await.is_ok());
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn loopback_authority_guard_accepts_the_panel_address() {
+        let port = 1234;
+
+        assert!(is_local_authority(
+            &headers(&[(header::HOST.as_str(), "127.0.0.1:1234")]),
+            port
+        ));
+        assert!(is_local_authority(
+            &headers(&[(header::HOST.as_str(), "localhost:1234")]),
+            port
+        ));
+        assert!(is_local_authority(
+            &headers(&[(header::HOST.as_str(), "[::1]:1234")]),
+            port
+        ));
+        // Same-origin POSTs carry Origin.
+        assert!(is_local_authority(
+            &headers(&[
+                (header::HOST.as_str(), "127.0.0.1:1234"),
+                (header::ORIGIN.as_str(), "http://127.0.0.1:1234"),
+                ("sec-fetch-site", "same-origin"),
+            ]),
+            port
+        ));
+    }
+
+    #[test]
+    fn loopback_authority_guard_rejects_rebinding_and_proxies() {
+        let port = 1234;
+
+        // DNS rebinding: attacker hostname resolving to 127.0.0.1.
+        assert!(!is_local_authority(
+            &headers(&[(header::HOST.as_str(), "evil.example:1234")]),
+            port
+        ));
+        // Wrong port on an otherwise local host.
+        assert!(!is_local_authority(
+            &headers(&[(header::HOST.as_str(), "127.0.0.1:1235")]),
+            port
+        ));
+        // Cross-origin request smuggled past the Host check.
+        assert!(!is_local_authority(
+            &headers(&[
+                (header::HOST.as_str(), "127.0.0.1:1234"),
+                (header::ORIGIN.as_str(), "http://evil.example:1234"),
+            ]),
+            port
+        ));
+        // Sandboxed/opaque origin.
+        assert!(!is_local_authority(
+            &headers(&[
+                (header::HOST.as_str(), "127.0.0.1:1234"),
+                (header::ORIGIN.as_str(), "null"),
+            ]),
+            port
+        ));
+        // Browsers mark cross-site fetches explicitly.
+        assert!(!is_local_authority(
+            &headers(&[
+                (header::HOST.as_str(), "127.0.0.1:1234"),
+                ("sec-fetch-site", "cross-site"),
+            ]),
+            port
+        ));
+        // Missing Host header (HTTP/1.0 style request).
+        assert!(!is_local_authority(&HeaderMap::new(), port));
+        // Lan address is not the panel address.
+        assert!(!is_local_authority(
+            &headers(&[(header::HOST.as_str(), "192.168.1.10:1234")]),
+            port
+        ));
     }
 }

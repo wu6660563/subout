@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # subout - Proxy Subscription Converter & Sing-box Web Panel
 # One-Click Install & Uninstall PowerShell Script for Windows
 # ==============================================================================
@@ -9,6 +9,7 @@ param (
     [ValidateSet("install", "uninstall", "help")]
     [string]$Action = "install",
 
+    [ValidateRange(1, 65535)]
     [int]$Port = 1234,
     [string]$BinPath = "",
     [string]$BinDir = "C:\Program Files\Subout",
@@ -48,6 +49,7 @@ function Show-Help {
     Write-Host "  -BinDir <string>   自定义安装目录 (默认: C:\Program Files\Subout)"
     Write-Host "  -DataDir <string>  自定义数据目录 (默认: C:\ProgramData\Subout)"
     Write-Host "  -Tag <string>      指定安装的 GitHub Release 版本标签 (如 v0.1.0)"
+    Write-Host "  -Version <string>  -Tag 的兼容别名"
     Write-Host "  -FromRelease       强制从 GitHub Releases 下载预编译文件 (即使在源码目录中)"
     Write-Host "  -NoService         仅安装二进制文件，不注册 Windows 后台任务"
     Write-Host "  -Uninstall         卸载模式 (等同于 uninstall 命令)"
@@ -73,12 +75,23 @@ function Disable-SystemProxy {
     try {
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         Set-ItemProperty -Path $regPath -Name "ProxyEnable" -Value 0 -ErrorAction SilentlyContinue
-        # Notify WinINET of the change so running apps pick it up immediately
-        $signature = @"
+        # Notify WinINET of the change so running apps pick it up immediately.
+        # Add-Type fails if the type already exists (e.g. the function is called more
+        # than once in the same session), so register it only when missing instead of
+        # silently losing the refresh notification.
+        $typeName = "Win32.WinInet"
+        if (-not ($typeName -as [type])) {
+            $signature = @"
 [DllImport("wininet.dll", SetLastError = true, CharSet = CharSet.Auto)]
 public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
 "@
-        $type = Add-Type -MemberDefinition $signature -Name WinInet -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+            Add-Type `
+                -MemberDefinition $signature `
+                -Name WinInet `
+                -Namespace Win32 `
+                -ErrorAction SilentlyContinue | Out-Null
+        }
+        $type = $typeName -as [type]
         if ($type) {
             # INTERNET_OPTION_SETTINGS_CHANGED = 39, INTERNET_OPTION_REFRESH = 37
             $type::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
@@ -107,6 +120,315 @@ function Add-Argument {
     else {
         $List.Add($Value)
     }
+}
+
+# Convert a possibly relative user-supplied path into an absolute one.
+# Required because the script re-launches itself elevated via ShellExecute, whose
+# working directory for the child process is not the caller's location.
+function Resolve-AbsolutePath {
+    param ([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $Path
+    }
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+
+    if (-not [System.IO.Path]::IsPathRooted($expanded)) {
+        $expanded = Join-Path $PWD.Path $expanded
+    }
+
+    try {
+        return [System.IO.Path]::GetFullPath($expanded)
+    }
+    catch {
+        return $expanded
+    }
+}
+
+# Build the Task Scheduler XML definition for the background panel.
+# Every interpolated value is XML-escaped: custom -BinDir / -DataDir paths may contain
+# metacharacters (& < > "), which would otherwise abort task registration and surface
+# as a misleading "please run as administrator" error.
+function New-SuboutTaskXml {
+    param (
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [string]$Description = "Subout Proxy Subscription Manager and Sing-box Web Panel"
+    )
+
+    $escape = {
+        param ([string]$Value)
+        if ([string]::IsNullOrEmpty($Value)) {
+            return ""
+        }
+        return [System.Security.SecurityElement]::Escape($Value)
+    }
+
+    $xTaskName = & $escape $TaskName
+    $xExePath = & $escape $ExePath
+    $xDataDir = & $escape $DataDir
+    $xDescription = & $escape $Description
+    # --data-dir is mandatory: AppPaths resolves the data directory from the command line
+    # (or %ProgramData%\Subout), NOT from the task's working directory. Without it a custom
+    # -DataDir would be ignored by the app and -Purge would delete the wrong directory.
+    $xArguments = & $escape ("web -p {0} --data-dir `"{1}`"" -f $Port, $DataDir)
+
+    return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>$xDescription</Description>
+    <URI>\$xTaskName</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$xExePath</Command>
+      <Arguments>$xArguments</Arguments>
+      <WorkingDirectory>$xDataDir</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"@
+}
+
+# Terminate sing-box kernels that were launched by Subout (matched by the data
+# directory on their command line). A forced task stop / Stop-Process does not run
+# Rust destructors, so kill_on_drop never fires: the kernel survives as an orphan and
+# keeps the TUN adapter and inbound ports busy, which makes the next start report a
+# conflicting process. Only Subout's own kernels are matched - a user's unrelated
+# sing-box installation is left alone.
+function Stop-SuboutKernel {
+    param (
+        [AllowEmptyString()][string[]]$DataDirs = @()
+    )
+
+    $needles = @()
+
+    foreach ($dir in $DataDirs) {
+        if ([string]::IsNullOrWhiteSpace($dir)) {
+            continue
+        }
+
+        $normalized = $dir.TrimEnd('\', '/').ToLowerInvariant()
+
+        # Guard against killing every sing-box on the machine for degenerate paths
+        # such as a bare drive root.
+        if ($normalized.Length -lt 4 -or $normalized -match '^[a-z]:$') {
+            continue
+        }
+
+        $needles += $normalized
+    }
+
+    if ($needles.Count -eq 0) {
+        return
+    }
+
+    try {
+        $candidates = Get-CimInstance `
+            -ClassName Win32_Process `
+            -Filter "Name = 'sing-box.exe' or Name = 'singbox.exe'" `
+            -ErrorAction Stop
+    }
+    catch {
+        Write-Host "  提示: 查询残留 sing-box 进程失败 (非致命): $_" -ForegroundColor Yellow
+        return
+    }
+
+    $killed = @()
+
+    foreach ($candidate in $candidates) {
+        $cmdLine = $candidate.CommandLine
+
+        if ([string]::IsNullOrWhiteSpace($cmdLine)) {
+            continue
+        }
+
+        $lower = $cmdLine.ToLowerInvariant()
+
+        foreach ($needle in $needles) {
+            if ($lower.Contains($needle)) {
+                try {
+                    Stop-Process -Id $candidate.ProcessId -Force -ErrorAction Stop
+                    $killed += $candidate.ProcessId
+                }
+                catch {
+                    # Already exited / access denied: best effort.
+                }
+                break
+            }
+        }
+    }
+
+    if ($killed.Count -gt 0) {
+        Write-Host "  ✓ 已终止 Subout 遗留的 sing-box 内核进程 (PID: $($killed -join ', '))" -ForegroundColor Green
+    }
+}
+
+# Remove a temporary download directory (best effort, never fails the install).
+function Remove-TempInstallDir {
+    param ([string]$Path)
+
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
+        Remove-Item `
+            -LiteralPath $Path `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+}
+
+# -Purge deletes recursively, so never allow it to target a drive root or a well-known
+# system directory (e.g. a typo such as -DataDir C:\Windows).
+function Test-SafePurgeTarget {
+    param ([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        return $false
+    }
+
+    $normalized = $full.TrimEnd('\', '/')
+
+    if ($normalized -match '^[A-Za-z]:$') {
+        return $false
+    }
+
+    $blocked = @(
+        $env:SystemRoot,
+        $env:WINDIR,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        $env:ProgramW6432,
+        $env:ProgramData,
+        $env:USERPROFILE
+    ) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\', '/') }
+
+    foreach ($blockedPath in $blocked) {
+        if ($normalized -eq $blockedPath) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+# Fast TCP check: Invoke-WebRequest can sit on its timeout even for a closed loopback
+# port, which would make the readiness probe far too slow when nothing is listening.
+function Test-PortListening {
+    param (
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutMs = 300
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+
+    try {
+        $async = $client.BeginConnect([System.Net.IPAddress]::Loopback, $Port, $null, $null)
+
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
+        }
+
+        $client.EndConnect($async)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+# Wait until the panel answers and return the port it actually bound.
+# The app silently moves up to +10 ports when the requested port is busy
+# (src/web/mod.rs: bind_available_listener), so the configured port is not
+# necessarily the URL the user must open.
+function Wait-SuboutPanel {
+    param (
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$Attempts = 10
+    )
+
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        for ($offset = 0; $offset -le 10; $offset++) {
+            $candidate = $Port + $offset
+
+            if ($candidate -gt 65535) {
+                break
+            }
+
+            if (-not (Test-PortListening -Port $candidate)) {
+                continue
+            }
+
+            try {
+                $response = Invoke-WebRequest `
+                    -Uri "http://127.0.0.1:$candidate/" `
+                    -UseBasicParsing `
+                    -TimeoutSec 2 `
+                    -ErrorAction Stop
+
+                if (
+                    $response.StatusCode -eq 200 -and
+                    $response.Content -match "Subout"
+                ) {
+                    return $candidate
+                }
+            }
+            catch {
+                # Listening, but not our panel / not ready yet.
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $null
 }
 
 # ------------------------------------------------------------------------------
@@ -171,7 +493,18 @@ if (-not (Test-IsAdmin)) {
         }
     }
 
-    # Build arguments
+    # Build arguments.
+    # Resolve user-supplied relative paths first: the elevated instance is started via
+    # ShellExecute (UAC), whose working directory is not the caller's location, so a
+    # relative -BinPath / -BinDir / -DataDir would resolve differently (usually to
+    # C:\Windows\System32) and fail with a bogus "file not found" error.
+    if ($BinPath) {
+        $BinPath = Resolve-AbsolutePath -Path $BinPath
+    }
+
+    $BinDir = Resolve-AbsolutePath -Path $BinDir
+    $DataDir = Resolve-AbsolutePath -Path $DataDir
+
     $argumentList = New-Object System.Collections.Generic.List[string]
 
     $argumentList.Add("-NoProfile")
@@ -219,13 +552,24 @@ if (-not (Test-IsAdmin)) {
         Add-Argument -List $argumentList -Name "-DataDir" -Value $DataDir
     }
 
+    $elevatedExitCode = 1
+
     try {
-        Start-Process `
+        # -Wait + -PassThru so the elevated run's exit code can be propagated:
+        # without it a failed install (build error, task registration denied, ...)
+        # still exits 0 and looks successful to callers and CI.
+        $elevatedProcess = Start-Process `
             -FilePath "powershell.exe" `
             -Verb RunAs `
+            -WorkingDirectory $PWD.Path `
             -ArgumentList ($argumentList -join " ") `
             -Wait `
+            -PassThru `
             -ErrorAction Stop
+
+        if ($null -ne $elevatedProcess) {
+            $elevatedExitCode = $elevatedProcess.ExitCode
+        }
     }
     catch {
         Write-Host ""
@@ -246,7 +590,12 @@ if (-not (Test-IsAdmin)) {
         }
     }
 
-    exit 0
+    if ($elevatedExitCode -ne 0) {
+        Write-Host ""
+        Write-Host "错误: 管理员权限实例执行失败 (退出码: $elevatedExitCode)。" -ForegroundColor Red
+    }
+
+    exit $elevatedExitCode
 }
 
 # ------------------------------------------------------------------------------
@@ -264,6 +613,15 @@ $GeneratedDir = Join-Path $DataDir "generated"
 $SubscriptionsDir = Join-Path $DataDir "subscriptions"
 $NodesDir = Join-Path $DataDir "nodes"
 $GitHubRepo = "geekdex/subout"
+
+# Data directory the app falls back to when --data-dir is absent. Used when hunting
+# leftover sing-box kernels, so a custom -DataDir still cleans up the default one too.
+$SystemDataDir = if ($env:ProgramData) {
+    Join-Path $env:ProgramData "Subout"
+}
+else {
+    "C:\ProgramData\Subout"
+}
 
 $arch = $env:PROCESSOR_ARCHITECTURE
 
@@ -327,6 +685,11 @@ if ($Uninstall) {
     # Stop any lingering processes
     Stop-Process -Name $AppName -Force -ErrorAction SilentlyContinue
 
+    # A forced task stop never runs the Rust destructors, so the sing-box kernel that
+    # Subout spawned survives as an orphan (keeping the TUN adapter and ports busy).
+    # Kill only kernels whose command line points at a Subout data directory.
+    Stop-SuboutKernel -DataDirs @($DataDir, $SystemDataDir)
+
     # 2. Remove binary
     if (Test-Path -LiteralPath $TargetExe) {
         Write-Host "[3/3] 正在删除可执行文件: $TargetExe" -ForegroundColor Blue
@@ -360,16 +723,30 @@ if ($Uninstall) {
     # 3. Handle data directory
     if ($Purge) {
         if (Test-Path -LiteralPath $DataDir) {
-            Write-Host ""
-            Write-Host "正在彻底清理数据、日志与配置目录 (--Purge): $DataDir" -ForegroundColor Yellow
+            if (-not (Test-SafePurgeTarget -Path $DataDir)) {
+                Write-Host ""
+                Write-Host "错误: 拒绝删除该目录 (磁盘根目录或系统目录): $DataDir" -ForegroundColor Red
+                Write-Host "已跳过 -Purge 清理，数据目录保持不变。" -ForegroundColor Yellow
+            }
+            else {
+                Write-Host ""
+                Write-Host "正在彻底清理数据、日志与配置目录 (--Purge): $DataDir" -ForegroundColor Yellow
 
-            Remove-Item `
-                -LiteralPath $DataDir `
-                -Recurse `
-                -Force `
-                -ErrorAction SilentlyContinue
+                Remove-Item `
+                    -LiteralPath $DataDir `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction SilentlyContinue
 
-            Write-Host "✓ 数据与日志目录已清理完毕。" -ForegroundColor Green
+                # Removal failures are suppressed (locked files); verify instead of
+                # printing success unconditionally.
+                if (Test-Path -LiteralPath $DataDir) {
+                    Write-Host "警告: 数据目录未能完全删除 (可能仍被占用)，请手动删除: $DataDir" -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host "✓ 数据与日志目录已清理完毕。" -ForegroundColor Green
+                }
+            }
         }
     }
     else {
@@ -408,6 +785,8 @@ Write-Host ""
 # ------------------------------------------------------------------------------
 
 $SourceExe = $null
+# Initialized here so the cleanup step below never depends on which branch ran.
+$TmpDir = $null
 
 $ScriptDir = $null
 if ($PSScriptRoot -and (Test-Path -LiteralPath $PSScriptRoot)) {
@@ -630,13 +1009,7 @@ if (-not $SourceExe) {
         Write-Host "错误: 从 GitHub Releases 下载或解压预编译二进制文件失败。" -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Red
 
-        if (Test-Path -LiteralPath $TmpDir) {
-            Remove-Item `
-                -LiteralPath $TmpDir `
-                -Recurse `
-                -Force `
-                -ErrorAction SilentlyContinue
-        }
+        Remove-TempInstallDir -Path $TmpDir
 
         exit 1
     }
@@ -652,6 +1025,7 @@ if (
 ) {
     Write-Host ""
     Write-Host "错误: 未能找到有效的 subout.exe 文件。" -ForegroundColor Red
+    Remove-TempInstallDir -Path $TmpDir
     exit 1
 }
 
@@ -661,11 +1035,23 @@ if (
 
 Write-Host "[2/4] 正在安装二进制文件到 $TargetExe..." -ForegroundColor Blue
 
+# IMPORTANT: clear the system proxy BEFORE the first kill.
+# Killing subout while it has the system proxy enabled leaves WinINET pointing at a
+# dead port (no traffic at all). The graceful shutdown that would restore it cannot
+# run here: the scheduled task is stopped with a hard terminate and the process is
+# killed with -Force. Clearing first also covers -NoService, which never reaches
+# step 11.
+Write-Host "  正在清除 Windows 系统代理设置 (防止断网)..." -ForegroundColor Blue
+Disable-SystemProxy
+
 # Stop running background task and processes before copying to avoid file lock
 try {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 } catch {}
 Stop-Process -Name $AppName -Force -ErrorAction SilentlyContinue
+
+# Kill the orphan sing-box kernel left behind by the forced stop (see Stop-SuboutKernel).
+Stop-SuboutKernel -DataDirs @($DataDir, $SystemDataDir)
 Start-Sleep -Milliseconds 500
 
 if (-not (Test-Path -LiteralPath $BinDir)) {
@@ -679,6 +1065,10 @@ Copy-Item `
     -LiteralPath $SourceExe `
     -Destination $TargetExe `
     -Force
+
+# Clear the "downloaded from the internet" mark (MOTW) inherited from the release zip,
+# otherwise running the exe manually later can trigger a SmartScreen prompt.
+Unblock-File -LiteralPath $TargetExe -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------------------------
 # 10. Create Data, Kernel & Logs Directory
@@ -703,8 +1093,56 @@ foreach ($dir in @(
     }
 }
 
+# Restrict the data directory to SYSTEM, Administrators and the installing user.
+# %ProgramData% is readable by every local user, and this directory holds subscription
+# tokens, node credentials and the generated sing-box config (which contains them all).
+$currentUserSid = $null
+try {
+    $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+} catch {}
+
+$aclFailures = 0
+
+$aclTargets = @(
+    $DataDir,
+    $KernelDir,
+    $GeneratedDir,
+    $SubscriptionsDir,
+    $NodesDir,
+    $LogDir,
+    $RuntimeDir
+)
+
+$grantArgs = @(
+    "/inheritance:r",
+    "/grant:r",
+    "*S-1-5-18:(OI)(CI)F",      # NT AUTHORITY\SYSTEM
+    "*S-1-5-32-544:(OI)(CI)F"   # BUILTIN\Administrators
+)
+
+if ($currentUserSid -and $currentUserSid -match '^S-1-') {
+    $grantArgs += "*${currentUserSid}:(OI)(CI)F"
+}
+
+foreach ($target in $aclTargets) {
+    if (Test-Path -LiteralPath $target) {
+        & icacls.exe $target @grantArgs /T /C *> $null
+        if ($LASTEXITCODE -ne 0) {
+            $aclFailures++
+        }
+    }
+}
+
+if ($aclFailures -eq 0) {
+    Write-Host "  ✓ 数据目录权限已收紧 (仅 SYSTEM / Administrators / 当前用户)" -ForegroundColor Green
+}
+else {
+    Write-Host "  提示: 收紧数据目录 ACL 失败 (非致命)，凭据文件可能对本地其他用户可读。" -ForegroundColor Yellow
+}
+
 # Check sing-box existence in system
 $hasSingBox = Get-Command sing-box -ErrorAction SilentlyContinue
+
 if ($hasSingBox) {
     Write-Host "✓ 检测到系统中已存在 sing-box: $($hasSingBox.Source)" -ForegroundColor Green
 }
@@ -717,19 +1155,29 @@ else {
 # 11. Configure & Start Windows Background Task
 # ------------------------------------------------------------------------------
 
+# Port the panel is expected to listen on; corrected by the readiness probe below.
+$ActualPort = $Port
+
 if ($NoService) {
+    # -NoService must also disarm a previously installed boot task: otherwise the old
+    # task keeps auto-starting the panel (with the old port/data dir) after a reboot,
+    # which is the opposite of what -NoService promises.
+    try {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    catch {
+        & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
+        & schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
+    }
+
     Write-Host "[4/4] 已跳过 Windows 后台任务配置 (-NoService)。" -ForegroundColor Yellow
 }
 else {
     Write-Host "[4/4] 正在配置 Windows 开机自启后台任务 ($TaskName)..." -ForegroundColor Blue
 
-    # 1. Stop and remove existing task & legacy service
-    # IMPORTANT: Clear system proxy BEFORE killing the old subout process.
-    # If subout has system proxy enabled, force-killing it leaves proxy pointing at a dead port
-    # → long-term network disconnection during the install/update process.
-    Write-Host "  正在清除 Windows 系统代理设置 (防止断网)..." -ForegroundColor Blue
-    Disable-SystemProxy
-
+    # 1. Stop and remove existing task & legacy service.
+    # The system proxy was already cleared in step 9, before the first kill.
     try {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -747,61 +1195,19 @@ else {
 
     # Stop lingering processes
     Stop-Process -Name $AppName -Force -ErrorAction SilentlyContinue
+    Stop-SuboutKernel -DataDirs @($DataDir, $SystemDataDir)
     Start-Sleep -Milliseconds 500
 
     # 2. Register Windows Scheduled Task using canonical XML definition
     # Using Task Scheduler XML schema guarantees 100% reliability across all Windows versions
     # and eliminates all command-line quoting/escaping issues with spaces in file paths.
-    $taskXml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>Subout Proxy Subscription Manager and Sing-box Web Panel</Description>
-    <URI>\$TaskName</URI>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-    </BootTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>4</Priority>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>3</Count>
-    </RestartOnFailure>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>$TargetExe</Command>
-      <Arguments>web -p $Port</Arguments>
-      <WorkingDirectory>$DataDir</WorkingDirectory>
-    </Exec>
-  </Actions>
-</Task>
-"@
+    # The XML is built (and escaped) by New-SuboutTaskXml; --data-dir is passed explicitly
+    # because the app resolves its data directory from the CLI, not from WorkingDirectory.
+    $taskXml = New-SuboutTaskXml `
+        -TaskName $TaskName `
+        -ExePath $TargetExe `
+        -Port $Port `
+        -DataDir $DataDir
 
     $taskRegistered = $false
 
@@ -854,19 +1260,27 @@ else {
     else {
         Write-Host "✓ Windows 后台守护任务已注册并启动 ($TaskName)" -ForegroundColor Green
     }
+
+    # Confirm the panel actually answers. The app silently moves up to +10 ports when
+    # the configured port is busy, so the configured port may not be the live one.
+    $listeningPort = Wait-SuboutPanel -Port $Port
+    if ($listeningPort) {
+        $ActualPort = $listeningPort
+        if ($listeningPort -ne $Port) {
+            Write-Host "  提示: 端口 $Port 已被占用，面板实际运行在端口 $listeningPort。" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "  警告: 未在 http://127.0.0.1:$Port 检测到面板响应。" -ForegroundColor Yellow
+        Write-Host "        请查看任务结果: Get-ScheduledTaskInfo -TaskName $TaskName" -ForegroundColor Gray
+    }
 }
 
 # ------------------------------------------------------------------------------
 # 12. Cleanup temporary download directory
 # ------------------------------------------------------------------------------
 
-if ($TmpDir -and (Test-Path -LiteralPath $TmpDir)) {
-    Remove-Item `
-        -LiteralPath $TmpDir `
-        -Recurse `
-        -Force `
-        -ErrorAction SilentlyContinue
-}
+Remove-TempInstallDir -Path $TmpDir
 
 # ------------------------------------------------------------------------------
 # 13. Summary
@@ -876,7 +1290,7 @@ Write-Host ""
 Write-Host "======================================================" -ForegroundColor Green
 Write-Host "🎉 subout 安装成功！" -ForegroundColor Green
 Write-Host "======================================================" -ForegroundColor Green
-Write-Host "📍 Web 管理面板地址 : http://127.0.0.1:$Port" -ForegroundColor Cyan
+Write-Host "📍 Web 管理面板地址 : http://127.0.0.1:$ActualPort" -ForegroundColor Cyan
 Write-Host "🔑 首次启动          : 打开面板后设置管理员密码" -ForegroundColor White
 Write-Host "💾 持久化数据目录   : $DataDir" -ForegroundColor White
 Write-Host "📝 系统日志目录     : $LogDir" -ForegroundColor White

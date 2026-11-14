@@ -73,9 +73,13 @@ impl PlatformStrategy for FallbackPlatform {
         format!("终止外部进程 (PID: {}) 失败：进程仍在运行", pid)
     }
 
-    fn enable_system_proxy(&self, _port: u16, _sudo_pass: Option<&str>) {}
+    fn enable_system_proxy(&self, _port: u16, _sudo_pass: Option<&str>) -> Result<()> {
+        Ok(())
+    }
 
-    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) {}
+    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) -> Result<()> {
+        Ok(())
+    }
 
     fn enable_tun_dns(&self, _dns_ip: &str, _sudo_pass: Option<&str>) {}
 

@@ -12,6 +12,7 @@ pub mod simple_config;
 pub mod web;
 
 use chrono::NaiveDate;
+use futures_util::StreamExt;
 use parser::Outbound;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
@@ -96,20 +97,50 @@ fn parse_size_value(input: &str) -> Option<i64> {
     Some((value * multiplier).round() as i64)
 }
 
+/// Case-insensitive `starts_with`, folding both sides char by char.
+fn starts_with_ignore_case(haystack: &str, needle: &str) -> bool {
+    let mut hay = haystack.chars().flat_map(char::to_lowercase);
+    let mut needle = needle.chars().flat_map(char::to_lowercase);
+
+    loop {
+        match (hay.next(), needle.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(a), Some(b)) if a == b => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Case-insensitive search that returns a byte offset **into `text`**.
+///
+/// Searching `text.to_lowercase()` cannot be used for slicing: some characters expand
+/// when lowercased (`İ` = 2 bytes -> `i̇` = 3 bytes, `K` = 3 bytes -> `k` = 1 byte), so an
+/// offset from the folded string is neither the right position nor necessarily a valid
+/// char boundary in the original — indexing with it used to panic on hostile
+/// subscription content (`byte index is not a char boundary`).
+fn find_ignore_case(text: &str, needle: &str) -> Option<usize> {
+    text.char_indices()
+        .find(|(idx, _)| starts_with_ignore_case(&text[*idx..], needle))
+        .map(|(idx, _)| idx)
+}
+
+/// Slice `text` after a match of `label`, returning `None` instead of panicking when the
+/// offset is not a char boundary (see `find_ignore_case`).
+fn text_after_label<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+    let pos = find_ignore_case(text, label)?;
+    text.get(pos.saturating_add(label.len())..)
+}
+
 fn parse_labeled_size(text: &str, labels: &[&str]) -> Option<i64> {
-    let lower = text.to_lowercase();
-    labels.iter().find_map(|label| {
-        lower
-            .find(&label.to_lowercase())
-            .and_then(|pos| parse_size_value(&text[pos + label.len()..]))
-    })
+    labels
+        .iter()
+        .find_map(|label| text_after_label(text, label).and_then(parse_size_value))
 }
 
 fn parse_labeled_date(text: &str, labels: &[&str]) -> Option<i64> {
-    let lower = text.to_lowercase();
     labels.iter().find_map(|label| {
-        let pos = lower.find(&label.to_lowercase())?;
-        text[pos + label.len()..]
+        text_after_label(text, label)?
             .split(|ch: char| !ch.is_ascii_digit() && ch != '-')
             .find_map(|part| {
                 if part.len() != 10 {
@@ -124,11 +155,10 @@ fn parse_labeled_date(text: &str, labels: &[&str]) -> Option<i64> {
 }
 
 fn parse_userinfo_text(text: &str) -> SubscriptionUserInfo {
-    let lower = text.to_lowercase();
-    let mut info = if let Some(pos) = lower.find("subscription-userinfo:") {
-        parse_userinfo_str(&text[pos + "subscription-userinfo:".len()..])
-    } else if let Some(pos) = lower.find("subscription-userinfo=") {
-        parse_userinfo_str(&text[pos + "subscription-userinfo=".len()..])
+    let mut info = if let Some(rest) = text_after_label(text, "subscription-userinfo:") {
+        parse_userinfo_str(rest)
+    } else if let Some(rest) = text_after_label(text, "subscription-userinfo=") {
+        parse_userinfo_str(rest)
     } else {
         parse_userinfo_str(text.trim_start_matches('#').trim_start_matches("//").trim())
     };
@@ -170,6 +200,44 @@ pub async fn fetch_subscription(url: &str) -> anyhow::Result<String> {
     Ok(content)
 }
 
+/// Hard cap for a subscription body.
+///
+/// The daemon runs as root/SYSTEM and re-reads every subscription on each auto-update tick,
+/// so a hostile or broken provider must not be able to make it buffer an unbounded amount
+/// of data (the body is decoded as base64 and parsed afterwards, multiplying the cost).
+const MAX_SUBSCRIPTION_BYTES: usize = 16 * 1024 * 1024;
+
+fn exceeds_body_limit(current_len: usize, incoming_len: usize, limit: usize) -> bool {
+    current_len.saturating_add(incoming_len) > limit
+}
+
+/// Reads a response body as text, aborting as soon as it exceeds `limit` bytes.
+async fn read_text_with_limit(
+    response: reqwest::Response,
+    limit: usize,
+) -> anyhow::Result<String> {
+    if let Some(length) = response.content_length()
+        && length > limit as u64
+    {
+        anyhow::bail!("订阅响应过大: {} 字节 (上限 {} 字节)", length, limit);
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer: Vec<u8> = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("读取订阅响应失败: {}", e))?;
+
+        if exceeds_body_limit(buffer.len(), chunk.len(), limit) {
+            anyhow::bail!("订阅响应超过 {} 字节上限，已中止读取", limit);
+        }
+
+        buffer.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
 /// Fetches subscription content and metadata (traffic, expire).
 pub async fn fetch_subscription_with_info(
     url: &str,
@@ -188,7 +256,7 @@ pub async fn fetch_subscription_with_info(
         header_info = parse_userinfo_str(userinfo_str);
     }
 
-    let text = response.text().await?;
+    let text = read_text_with_limit(response, MAX_SUBSCRIPTION_BYTES).await?;
     let body_info = parse_userinfo_from_body(&text);
     let final_info = header_info.merge(body_info);
 
@@ -476,5 +544,60 @@ mod tests {
         assert!(is_singbox_fake_ip("198.19.255.254".parse().unwrap()));
         assert!(!is_singbox_fake_ip("198.20.0.1".parse().unwrap()));
         assert!(!is_singbox_fake_ip("127.0.0.1".parse().unwrap()));
+    }
+
+    // Regression tests: `text.to_lowercase()` can change byte lengths ('İ' 2 -> 3 bytes,
+    // 'K' 3 -> 1 byte), so offsets from the folded string must never be used to index the
+    // original one. These inputs used to panic with "byte index is not a char boundary"
+    // (or an out-of-bounds slice) while parsing subscription content.
+
+    #[test]
+    fn labeled_size_survives_case_folding_that_changes_byte_length() {
+        assert_eq!(
+            parse_labeled_size("\u{130}剩余流量：47.85 GB", &["剩余流量"]),
+            Some(51_378_546_278)
+        );
+        assert_eq!(
+            parse_labeled_size("\u{212A}remaining: 47.85 GB", &["remaining"]),
+            Some(51_378_546_278)
+        );
+    }
+
+    #[test]
+    fn labeled_date_survives_case_folding_that_changes_byte_length() {
+        let expected = parse_labeled_date("套餐到期：2027-11-14", &["套餐到期"]);
+        assert!(expected.is_some());
+        assert_eq!(
+            parse_labeled_date("\u{212A}套餐到期：2027-11-14", &["套餐到期"]),
+            expected
+        );
+    }
+
+    #[test]
+    fn userinfo_header_survives_case_folding_that_changes_byte_length() {
+        let info = parse_userinfo_text("\u{130}subscription-userinfo: upload=1; total=1000");
+        assert_eq!(info.total, Some(1000));
+        let info = parse_userinfo_text("\u{212A}SUBSCRIPTION-USERINFO: total=2000");
+        assert_eq!(info.total, Some(2000));
+    }
+
+    #[test]
+    fn userinfo_body_survives_case_folding_that_changes_byte_length() {
+        // Same shape as a subscription whose remarks carry traffic/expiry labels.
+        let info = parse_userinfo_from_body("\u{130}剩余流量：47.85 GB\n\u{212A}套餐到期：2027-11-14");
+        assert_eq!(info.remaining, Some(51_378_546_278));
+        assert!(info.expire.is_some());
+    }
+
+    #[test]
+    fn subscription_body_limit_rejects_oversized_chunks() {
+        let limit = MAX_SUBSCRIPTION_BYTES;
+
+        assert!(!exceeds_body_limit(0, limit, limit));
+        assert!(exceeds_body_limit(0, limit + 1, limit));
+        assert!(exceeds_body_limit(limit, 1, limit));
+        // Saturating arithmetic: a huge chunk must not wrap around to "small".
+        assert!(exceeds_body_limit(usize::MAX, 1, limit));
+        assert!(exceeds_body_limit(1, usize::MAX, limit));
     }
 }

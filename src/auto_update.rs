@@ -359,7 +359,8 @@ pub async fn run_auto_update_process(
             let _ = std::fs::create_dir_all(parent);
         }
         let new_config_str = serde_json::to_string_pretty(&final_config)?;
-        std::fs::write(&running_config_path, &new_config_str)?;
+        // Owner-only: the generated config carries every node credential.
+        crate::paths::write_private_file(&running_config_path, &new_config_str)?;
         update_log(&format!(
             "  -> 配置文件已成功保存至 {:?}",
             running_config_path

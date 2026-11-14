@@ -1117,7 +1117,8 @@ impl SingBoxServiceManager {
         let config_str = serde_json::to_string_pretty(&final_config_json)?;
 
         // 3. Write config file
-        std::fs::write(&config_path, &config_str)
+        // Owner-only: the generated config carries every node credential.
+        crate::paths::write_private_file(&config_path, &config_str)
             .map_err(|e| anyhow!("写入 sing-box 运行配置文件失败: {}", e))?;
 
         let explicit_pass = sudo_pass.and_then(|p| {
@@ -1565,10 +1566,37 @@ impl SingBoxServiceManager {
 
         let cached_pass = self.cached_sudo_pass.read().await.clone();
         if let Some(port) = get_mixed_port_from_config(config_json) {
-            platform.enable_system_proxy(port, cached_pass.as_deref());
-            if platform.is_linux() || platform.is_macos() || platform.is_windows() {
-                self.append_log(&format!("🌐 已自动设置系统网络代理 (127.0.0.1:{})", port))
-                    .await;
+            // A proxy failure must not abort the start (the core is already running and
+            // TUN/direct still work), but it must be visible instead of claiming success.
+            match platform.enable_system_proxy(port, cached_pass.as_deref()) {
+                Ok(()) => {
+                    if platform.is_linux() || platform.is_macos() || platform.is_windows() {
+                        if platform.supports_system_proxy() {
+                            self.append_log(&format!(
+                                "🌐 已自动设置系统网络代理 (127.0.0.1:{})",
+                                port
+                            ))
+                            .await;
+
+                            if platform.is_windows() {
+                                self.append_log(
+                                    "提示: Windows 系统代理写入当前登录用户，部分应用需重启后才会生效。",
+                                )
+                                .await;
+                            }
+                        }
+                        else {
+                            self.append_log(
+                                "提示: 当前环境没有桌面会话，系统代理不可用 (可改用 TUN 模式)。",
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.append_log(&format!("⚠️ 系统网络代理设置失败: {}", err))
+                        .await;
+                }
             }
         }
         if tun_mode {
@@ -1675,11 +1703,23 @@ impl SingBoxServiceManager {
             }
         }
 
-        platform.disable_system_proxy(cached_pass.as_deref());
-        platform.disable_tun_dns(cached_pass.as_deref());
-        if platform.is_linux() || platform.is_macos() || platform.is_windows() {
-            self.append_log("🌐 已恢复系统原始网络代理设置").await;
+        // Restoring the proxy must never block a stop; report it, then continue.
+        match platform.disable_system_proxy(cached_pass.as_deref()) {
+            Ok(()) => {
+                if platform.is_linux() || platform.is_macos() || platform.is_windows() {
+                    self.append_log("🌐 已恢复系统原始网络代理设置").await;
+                }
+            }
+            Err(err) => {
+                self.append_log(&format!(
+                    "⚠️ 恢复系统代理设置失败 (请手动检查系统代理开关): {}",
+                    err
+                ))
+                .await;
+            }
         }
+
+        platform.disable_tun_dns(cached_pass.as_deref());
 
         if had_child || pid_opt.is_some() {
             self.append_log("⏹️ sing-box 服务已停止").await;

@@ -289,6 +289,13 @@ impl PlatformStrategy for MacOsPlatform {
                             if pid == current_pid || pid <= 1 || Some(pid) == exclude_pid {
                                 continue;
                             }
+
+                            // `parts[2]` is `comm`: only a real sing-box binary may be
+                            // killed here, never an editor that merely opened the config.
+                            if !crate::platform::is_singbox_process_name(parts[2]) {
+                                continue;
+                            }
+
                             let full_cmd = parts[2..].join(" ");
                             let is_subout_instance = full_cmd.contains(&config_path_str)
                                 || full_cmd.contains("sing-box.json")
@@ -393,32 +400,48 @@ impl PlatformStrategy for MacOsPlatform {
         }
     }
 
-    fn enable_system_proxy(&self, port: u16, sudo_pass: Option<&str>) {
+    fn enable_system_proxy(&self, port: u16, sudo_pass: Option<&str>) -> Result<()> {
         let services = get_macos_network_services();
         let port_str = port.to_string();
+        let mut applied = true;
+
         for svc in services {
-            run_macos_netsetup(&["-setwebproxy", &svc, "127.0.0.1", &port_str], sudo_pass);
-            run_macos_netsetup(
+            applied &= run_macos_netsetup(&["-setwebproxy", &svc, "127.0.0.1", &port_str], sudo_pass);
+            applied &= run_macos_netsetup(
                 &["-setsecurewebproxy", &svc, "127.0.0.1", &port_str],
                 sudo_pass,
             );
-            run_macos_netsetup(
+            applied &= run_macos_netsetup(
                 &["-setsocksfirewallproxy", &svc, "127.0.0.1", &port_str],
                 sudo_pass,
             );
-            run_macos_netsetup(&["-setwebproxystate", &svc, "on"], sudo_pass);
-            run_macos_netsetup(&["-setsecurewebproxystate", &svc, "on"], sudo_pass);
-            run_macos_netsetup(&["-setsocksfirewallproxystate", &svc, "on"], sudo_pass);
+            applied &= run_macos_netsetup(&["-setwebproxystate", &svc, "on"], sudo_pass);
+            applied &= run_macos_netsetup(&["-setsecurewebproxystate", &svc, "on"], sudo_pass);
+            applied &= run_macos_netsetup(&["-setsocksfirewallproxystate", &svc, "on"], sudo_pass);
         }
+
+        if !applied {
+            anyhow::bail!("写入 macOS 系统代理失败 (networksetup)");
+        }
+
+        Ok(())
     }
 
-    fn disable_system_proxy(&self, sudo_pass: Option<&str>) {
+    fn disable_system_proxy(&self, sudo_pass: Option<&str>) -> Result<()> {
         let services = get_macos_network_services();
+        let mut disabled = true;
+
         for svc in services {
-            run_macos_netsetup(&["-setwebproxystate", &svc, "off"], sudo_pass);
-            run_macos_netsetup(&["-setsecurewebproxystate", &svc, "off"], sudo_pass);
-            run_macos_netsetup(&["-setsocksfirewallproxystate", &svc, "off"], sudo_pass);
+            disabled &= run_macos_netsetup(&["-setwebproxystate", &svc, "off"], sudo_pass);
+            disabled &= run_macos_netsetup(&["-setsecurewebproxystate", &svc, "off"], sudo_pass);
+            disabled &= run_macos_netsetup(&["-setsocksfirewallproxystate", &svc, "off"], sudo_pass);
         }
+
+        if !disabled {
+            anyhow::bail!("关闭 macOS 系统代理失败 (networksetup)");
+        }
+
+        Ok(())
     }
 
     fn enable_tun_dns(&self, dns_ip: &str, sudo_pass: Option<&str>) {
@@ -563,14 +586,20 @@ pub fn get_macos_network_services() -> Vec<String> {
         .collect()
 }
 
-pub fn run_macos_netsetup(args: &[&str], sudo_pass: Option<&str>) {
+/// Runs `networksetup`, returning whether the command succeeded.
+///
+/// The proxy helpers use the return value to report failures instead of logging
+/// "系统代理已开启" while every service still goes direct.
+pub fn run_macos_netsetup(args: &[&str], sudo_pass: Option<&str>) -> bool {
     #[cfg(unix)]
     {
         use crate::platform::PlatformStrategy;
         if MacOsPlatform.is_running_as_root() {
-            let _ = std::process::Command::new("networksetup")
+            return std::process::Command::new("networksetup")
                 .args(args)
-                .output();
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
         } else if let Some(pass) = sudo_pass {
             use std::io::Write;
             let mut child = match std::process::Command::new("sudo")
@@ -587,20 +616,26 @@ pub fn run_macos_netsetup(args: &[&str], sudo_pass: Option<&str>) {
                 .spawn()
             {
                 Ok(c) => c,
-                Err(_) => return,
+                Err(_) => return false,
             };
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = writeln!(stdin, "{}", pass);
             }
-            let _ = child.wait();
+            return child
+                .wait()
+                .map(|status| status.success())
+                .unwrap_or(false);
         } else {
-            let _ = std::process::Command::new("networksetup")
+            return std::process::Command::new("networksetup")
                 .args(args)
-                .output();
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
         }
     }
     #[cfg(not(unix))]
     {
         let _ = (args, sudo_pass);
+        false
     }
 }

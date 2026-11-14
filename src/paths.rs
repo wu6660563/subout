@@ -4,6 +4,71 @@ use std::sync::OnceLock;
 static GLOBAL_PATHS: OnceLock<AppPaths> = OnceLock::new();
 static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Restrict a directory to the account running the daemon (0700 on Unix).
+///
+/// The data directory holds subscription tokens, node credentials and the generated
+/// sing-box config. Platform defaults (`/var/lib/subout`, `C:\ProgramData\Subout`) are
+/// world-readable, so every local user could otherwise read every proxy credential.
+pub fn restrict_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows the ACL is applied by the installer (icacls); a plain chmod would only
+        // toggle the read-only attribute.
+        let _ = path;
+    }
+}
+
+/// Restrict a file to the account running the daemon (0600 on Unix).
+pub fn restrict_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Write a file that contains credentials, creating it 0600 from the start so there is no
+/// window in which it is world-readable.
+pub fn write_private_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+
+        file.write_all(contents.as_bytes())?;
+
+        // `open` keeps the mode of a file that already exists; force it either way.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub config_dir: PathBuf,
@@ -187,6 +252,23 @@ impl AppPaths {
 
         // Attempt creating config_dir if writable
         let _ = std::fs::create_dir_all(&self.config_dir);
+
+        // Every one of these holds credentials or generated config; keep them owner-only
+        // even when the parent (e.g. /var/lib or %ProgramData%) is world-readable.
+        for dir in [
+            &self.data_dir,
+            &self.log_dir,
+            &self.runtime_dir,
+            &self.config_dir,
+            &self.kernel_dir(),
+            &self.generated_dir(),
+            &self.subscriptions_dir(),
+            &self.nodes_dir(),
+            &self.rulesets_dir(),
+        ] {
+            restrict_dir(dir);
+        }
+
         Ok(())
     }
 
@@ -506,6 +588,43 @@ fn find_in_path(cmd_name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_file_round_trip_and_permissions() {
+        let dir = std::env::temp_dir().join(format!(
+            "subout_private_file_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        let target = dir.join("generated").join("sing-box.json");
+        write_private_file(&target, "{\"secret\":\"uuid\"}").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"secret\":\"uuid\"}"
+        );
+
+        // Overwriting keeps the restrictive mode instead of widening it.
+        write_private_file(&target, "{}").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "generated config must not be world-readable");
+
+            restrict_dir(&dir);
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "data directory must not be world-readable");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_app_paths_resolution_explicit_cli() {

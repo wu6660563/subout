@@ -1074,7 +1074,8 @@ pub async fn sync_history_config_resources(
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(new_config_str) = serde_json::to_string_pretty(&updated_config) {
-            let _ = std::fs::write(&running_config_path, &new_config_str);
+            // Owner-only: the generated config carries every node credential.
+            let _ = crate::paths::write_private_file(&running_config_path, &new_config_str);
         }
 
         if state.service_manager.is_running().await

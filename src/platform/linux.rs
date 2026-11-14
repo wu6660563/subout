@@ -499,6 +499,13 @@ impl PlatformStrategy for LinuxPlatform {
                             if pid == current_pid || pid <= 1 || Some(pid) == exclude_pid {
                                 continue;
                             }
+
+                            // `parts[2]` is `comm`: only a real sing-box binary may be
+                            // killed here, never an editor that merely opened the config.
+                            if !crate::platform::is_singbox_process_name(parts[2]) {
+                                continue;
+                            }
+
                             let full_cmd = parts[2..].join(" ");
                             let is_subout_instance = full_cmd.contains(&config_path_str)
                                 || full_cmd.contains("sing-box.json")
@@ -523,6 +530,16 @@ impl PlatformStrategy for LinuxPlatform {
                             }
                             let cmdline_path = entry.path().join("cmdline");
                             if let Ok(bytes) = std::fs::read(&cmdline_path) {
+                                // Same guard as the `ps` path: the executable name must be
+                                // a sing-box kernel before the argv is considered.
+                                let comm =
+                                    std::fs::read_to_string(entry.path().join("comm"))
+                                        .unwrap_or_default();
+
+                                if !crate::platform::is_singbox_process_name(&comm) {
+                                    continue;
+                                }
+
                                 let cmdline = bytes
                                     .split(|&b| b == 0)
                                     .filter(|s| !s.is_empty())
@@ -677,7 +694,16 @@ impl PlatformStrategy for LinuxPlatform {
         }
     }
 
-    fn enable_system_proxy(&self, port: u16, _sudo_pass: Option<&str>) {
+    fn supports_system_proxy(&self) -> bool {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .or_else(|_| std::env::var("XDG_SESSION_DESKTOP"))
+            .unwrap_or_default();
+
+        // Headless servers (systemd, no XDG session) have no desktop proxy to write.
+        proxy_backend_for_desktop(&desktop).is_some()
+    }
+
+    fn enable_system_proxy(&self, port: u16, _sudo_pass: Option<&str>) -> Result<()> {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP")
             .or_else(|_| std::env::var("XDG_SESSION_DESKTOP"))
             .unwrap_or_default();
@@ -691,13 +717,19 @@ impl PlatformStrategy for LinuxPlatform {
                     *saved = state;
                 }
                 let port = port.to_string();
-                let _ = gsettings_set("mode", "manual");
-                let _ = gsettings_set("http host", "127.0.0.1");
-                let _ = gsettings_set("http port", &port);
-                let _ = gsettings_set("https host", "127.0.0.1");
-                let _ = gsettings_set("https port", &port);
-                let _ = gsettings_set("socks host", "127.0.0.1");
-                let _ = gsettings_set("socks port", &port);
+                // Evaluate every setter (non-short-circuit `&`) so a partial failure is
+                // reported instead of leaving half of the proxy settings applied.
+                let applied = gsettings_set("mode", "manual")
+                    & gsettings_set("http host", "127.0.0.1")
+                    & gsettings_set("http port", &port)
+                    & gsettings_set("https host", "127.0.0.1")
+                    & gsettings_set("https port", &port)
+                    & gsettings_set("socks host", "127.0.0.1")
+                    & gsettings_set("socks port", &port);
+
+                if !applied {
+                    anyhow::bail!("写入 GNOME 系统代理设置失败 (gsettings)");
+                }
             }
             Some("kwriteconfig") => {
                 let port = port.to_string();
@@ -706,7 +738,7 @@ impl PlatformStrategy for LinuxPlatform {
                 } else {
                     "kwriteconfig5"
                 };
-                let _ = run_command(
+                let applied = run_command(
                     command,
                     &[
                         "--file",
@@ -717,8 +749,7 @@ impl PlatformStrategy for LinuxPlatform {
                         "ProxyType",
                         "1",
                     ],
-                );
-                let _ = run_command(
+                ) & run_command(
                     command,
                     &[
                         "--file",
@@ -729,8 +760,7 @@ impl PlatformStrategy for LinuxPlatform {
                         "httpProxy",
                         &format!("http://127.0.0.1:{}", port),
                     ],
-                );
-                let _ = run_command(
+                ) & run_command(
                     command,
                     &[
                         "--file",
@@ -741,8 +771,7 @@ impl PlatformStrategy for LinuxPlatform {
                         "httpsProxy",
                         &format!("http://127.0.0.1:{}", port),
                     ],
-                );
-                let _ = run_command(
+                ) & run_command(
                     command,
                     &[
                         "--file",
@@ -754,24 +783,37 @@ impl PlatformStrategy for LinuxPlatform {
                         &format!("socks://127.0.0.1:{}", port),
                     ],
                 );
+
+                if !applied {
+                    anyhow::bail!("写入 KDE 系统代理设置失败 (kwriteconfig)");
+                }
             }
+            // Headless / unsupported desktop: there is no desktop-wide proxy to set. This
+            // is not a failure (the panel still works through TUN or a manual proxy).
             _ => {}
         }
+
+        Ok(())
     }
 
-    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) {
+    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) -> Result<()> {
         if let Some(lock) = GNOME_PROXY_STATE.get()
             && let Ok(mut saved) = lock.lock()
             && let Some(state) = saved.take()
         {
-            let _ = gsettings_set("mode", &state.mode);
-            let _ = gsettings_set("http host", &state.http_host);
-            let _ = gsettings_set("http port", &state.http_port);
-            let _ = gsettings_set("https host", &state.https_host);
-            let _ = gsettings_set("https port", &state.https_port);
-            let _ = gsettings_set("socks host", &state.socks_host);
-            let _ = gsettings_set("socks port", &state.socks_port);
-            return;
+            let restored = gsettings_set("mode", &state.mode)
+                & gsettings_set("http host", &state.http_host)
+                & gsettings_set("http port", &state.http_port)
+                & gsettings_set("https host", &state.https_host)
+                & gsettings_set("https port", &state.https_port)
+                & gsettings_set("socks host", &state.socks_host)
+                & gsettings_set("socks port", &state.socks_port);
+
+            if !restored {
+                anyhow::bail!("恢复 GNOME 原始代理设置失败 (gsettings)");
+            }
+
+            return Ok(());
         }
 
         let desktop = std::env::var("XDG_CURRENT_DESKTOP")
@@ -783,7 +825,7 @@ impl PlatformStrategy for LinuxPlatform {
             } else {
                 "kwriteconfig5"
             };
-            let _ = run_command(
+            let disabled = run_command(
                 command,
                 &[
                     "--file",
@@ -795,7 +837,13 @@ impl PlatformStrategy for LinuxPlatform {
                     "0",
                 ],
             );
+
+            if !disabled {
+                anyhow::bail!("关闭 KDE 系统代理失败 (kwriteconfig)");
+            }
         }
+
+        Ok(())
     }
 
     fn enable_tun_dns(&self, _dns_ip: &str, _sudo_pass: Option<&str>) {}

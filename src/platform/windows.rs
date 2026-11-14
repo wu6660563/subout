@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,293 @@ pub fn relaunch_current_process_as_administrator(parent_pid: u32) -> Result<()> 
 
 fn powershell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+// ------------------------------------------------------------------------------
+// System proxy (WinINET) registry plumbing
+// ------------------------------------------------------------------------------
+
+const INTERNET_SETTINGS_SUBKEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+const PROXY_OVERRIDE_HOSTS: &str = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*";
+
+/// `true` when this process runs as the built-in SYSTEM account (scheduled task / service).
+fn running_as_system_account() -> bool {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+
+    user.eq_ignore_ascii_case("SYSTEM")
+        || (domain.eq_ignore_ascii_case("NT AUTHORITY") && user.eq_ignore_ascii_case("SYSTEM"))
+}
+
+/// Registry root (`HKU\<SID>`) of the user currently logged on to the desktop.
+///
+/// A daemon started by a scheduled task or a service runs as SYSTEM, whose own `HKCU` is
+/// `HKU\S-1-5-18`. No browser or WinINET client ever reads that hive, so writing the proxy
+/// switch there is a silent no-op for the person using the panel. Resolve the interactive
+/// user's SID and address their profile hive instead (SYSTEM may write every loaded hive).
+fn interactive_user_hive_root() -> Option<String> {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        use std::os::windows::process::CommandExt;
+
+        let script = "$u=(Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName; \
+                      if($u){ (New-Object System.Security.Principal.NTAccount($u)).Translate([System.Security.Principal.SecurityIdentifier]).Value }";
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let sid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if sid.starts_with("S-1-") && sid != "S-1-5-18" {
+            return Some(format!(r"HKU\{}", sid));
+        }
+
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// `HKU\<SID>` of the desktop user, or `HKCU` when this process *is* that user.
+fn proxy_hive_root() -> Option<String> {
+    if let Some(root) = interactive_user_hive_root() {
+        return Some(root);
+    }
+
+    if running_as_system_account() {
+        // Never fall back to the SYSTEM hive here: it would report success while changing
+        // a setting no application reads.
+        return None;
+    }
+
+    // Elevated run inside the user's own session: HKCU already is that user's hive.
+    Some("HKCU".to_string())
+}
+
+fn proxy_settings_key(root: &str) -> String {
+    format!(r"{}\{}", root, INTERNET_SETTINGS_SUBKEY)
+}
+
+/// Where the pre-Subout proxy settings are remembered for restoration.
+fn proxy_backup_key(root: &str) -> String {
+    format!(r"{}\Software\Subout\ProxyBackup", root)
+}
+
+fn reg_add(key_path: &str, name: &str, kind: &str, value: &str) -> bool {
+    std::process::Command::new("reg")
+        .args(["add", key_path, "/v", name, "/t", kind, "/d", value, "/f"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn reg_delete(key_path: &str, name: &str) -> bool {
+    std::process::Command::new("reg")
+        .args(["delete", key_path, "/v", name, "/f"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn reg_delete_key(key_path: &str) -> bool {
+    std::process::Command::new("reg")
+        .args(["delete", key_path, "/f"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn reg_query_dword(key_path: &str, name: &str) -> Option<u32> {
+    let output = std::process::Command::new("reg")
+        .args(["query", key_path, "/v", name])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_reg_dword(&String::from_utf8_lossy(&output.stdout), name)
+}
+
+fn reg_query_string(key_path: &str, name: &str) -> Option<String> {
+    let output = std::process::Command::new("reg")
+        .args(["query", key_path, "/v", name])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_reg_string(&String::from_utf8_lossy(&output.stdout), name)
+}
+
+/// Parses `    ProxyEnable    REG_DWORD    0x1` out of `reg query` output.
+fn parse_reg_dword(stdout: &str, name: &str) -> Option<u32> {
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+
+        if parts.next() != Some(name) {
+            continue;
+        }
+
+        let _kind = parts.next()?;
+        let raw = parts.next()?.trim();
+        let hex = raw
+            .strip_prefix("0x")
+            .or_else(|| raw.strip_prefix("0X"))
+            .unwrap_or(raw);
+
+        return u32::from_str_radix(hex, 16).ok();
+    }
+
+    None
+}
+
+/// Parses `    ProxyServer    REG_SZ    127.0.0.1:1234` out of `reg query` output.
+///
+/// The value may contain spaces (`ProxyOverride` typically does), so only the name and the
+/// type are tokenised and the remainder is kept verbatim.
+fn parse_reg_string(stdout: &str, name: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(name) else {
+            continue;
+        };
+
+        if !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+
+        let mut split = rest.trim_start().splitn(2, char::is_whitespace);
+        let _kind = split.next()?;
+
+        return Some(
+            split
+                .next()
+                .unwrap_or_default()
+                .trim_start()
+                .trim_end()
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+/// Snapshot the user's own proxy settings, exactly once, before Subout overwrites them.
+///
+/// Without it the original server/override are unrecoverable: `disable_system_proxy` could
+/// only switch our entry off, leaving the user with no proxy at all. Snapshotting is
+/// skipped when one already exists — after a crash the settings already contain Subout's
+/// own `127.0.0.1:<port>`, and backing *that* up would destroy the real originals.
+fn save_proxy_backup(root: &str, settings_key: &str) -> Result<()> {
+    let backup_key = proxy_backup_key(root);
+
+    if reg_query_dword(&backup_key, "Saved") == Some(1) {
+        return Ok(());
+    }
+
+    if let Some(value) = reg_query_dword(settings_key, "ProxyEnable")
+        && !reg_add(&backup_key, "ProxyEnable", "REG_DWORD", &value.to_string())
+    {
+        return Err(anyhow!("保存原始 ProxyEnable 失败: {}", backup_key));
+    }
+
+    if let Some(value) = reg_query_string(settings_key, "ProxyServer")
+        && !reg_add(&backup_key, "ProxyServer", "REG_SZ", &value)
+    {
+        return Err(anyhow!("保存原始 ProxyServer 失败: {}", backup_key));
+    }
+
+    if let Some(value) = reg_query_string(settings_key, "ProxyOverride")
+        && !reg_add(&backup_key, "ProxyOverride", "REG_SZ", &value)
+    {
+        return Err(anyhow!("保存原始 ProxyOverride 失败: {}", backup_key));
+    }
+
+    if !reg_add(&backup_key, "Saved", "REG_DWORD", "1") {
+        return Err(anyhow!("标记代理备份失败: {}", backup_key));
+    }
+
+    Ok(())
+}
+
+/// Restore the snapshot written by `save_proxy_backup`.
+///
+/// Returns whether a snapshot existed. Values that were absent before are deleted again so
+/// the user's configuration is left exactly as it was found.
+fn restore_proxy_backup(root: &str, settings_key: &str) -> Result<bool> {
+    let backup_key = proxy_backup_key(root);
+
+    if reg_query_dword(&backup_key, "Saved") != Some(1) {
+        return Ok(false);
+    }
+
+    match reg_query_dword(&backup_key, "ProxyEnable") {
+        Some(value) => {
+            let written = reg_add(settings_key, "ProxyEnable", "REG_DWORD", &value.to_string())
+                && reg_query_dword(settings_key, "ProxyEnable") == Some(value);
+
+            if !written {
+                return Err(anyhow!("恢复原始 ProxyEnable 失败"));
+            }
+        }
+        None => {
+            reg_delete(settings_key, "ProxyEnable");
+
+            if reg_query_dword(settings_key, "ProxyEnable").is_some() {
+                return Err(anyhow!("清除 ProxyEnable 失败"));
+            }
+        }
+    }
+
+    match reg_query_string(&backup_key, "ProxyServer") {
+        Some(value) => {
+            let written = reg_add(settings_key, "ProxyServer", "REG_SZ", &value)
+                && reg_query_string(settings_key, "ProxyServer").as_deref() == Some(value.as_str());
+
+            if !written {
+                return Err(anyhow!("恢复原始 ProxyServer 失败"));
+            }
+        }
+        None => {
+            reg_delete(settings_key, "ProxyServer");
+        }
+    }
+
+    match reg_query_string(&backup_key, "ProxyOverride") {
+        Some(value) => {
+            let written = reg_add(settings_key, "ProxyOverride", "REG_SZ", &value)
+                && reg_query_string(settings_key, "ProxyOverride").as_deref()
+                    == Some(value.as_str());
+
+            if !written {
+                return Err(anyhow!("恢复原始 ProxyOverride 失败"));
+            }
+        }
+        None => {
+            reg_delete(settings_key, "ProxyOverride");
+        }
+    }
+
+    // Consumed: the next enable takes a fresh snapshot.
+    reg_delete_key(&backup_key);
+
+    Ok(true)
 }
 
 impl PlatformStrategy for WindowsPlatform {
@@ -360,71 +647,88 @@ impl PlatformStrategy for WindowsPlatform {
         )
     }
 
-    fn enable_system_proxy(&self, port: u16, _sudo_pass: Option<&str>) {
+    fn enable_system_proxy(&self, port: u16, _sudo_pass: Option<&str>) -> Result<()> {
+        let root = proxy_hive_root().ok_or_else(|| {
+            anyhow::anyhow!(
+                "未能确定交互式登录用户的注册表配置单元：系统代理只能写入已登录桌面的用户。\
+                 请先登录桌面后再开启系统代理，或改用 TUN 模式。"
+            )
+        })?;
+
+        let settings_key = proxy_settings_key(&root);
+
+        // Remember the user's own proxy settings before the first overwrite.
+        save_proxy_backup(&root, &settings_key)?;
+
         let proxy_addr = format!("127.0.0.1:{}", port);
-        let override_hosts = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*";
 
-        let _ = std::process::Command::new("reg")
-            .args([
-                "add",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ])
-            .output();
+        if !reg_add(&settings_key, "ProxyEnable", "REG_DWORD", "1") {
+            anyhow::bail!("写入 ProxyEnable 失败: {}", settings_key);
+        }
 
-        let _ = std::process::Command::new("reg")
-            .args([
-                "add",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                "/v",
-                "ProxyServer",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &proxy_addr,
-                "/f",
-            ])
-            .output();
+        if !reg_add(&settings_key, "ProxyServer", "REG_SZ", &proxy_addr) {
+            anyhow::bail!("写入 ProxyServer 失败: {}", settings_key);
+        }
 
-        let _ = std::process::Command::new("reg")
-            .args([
-                "add",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                "/v",
-                "ProxyOverride",
-                "/t",
-                "REG_SZ",
-                "/d",
-                override_hosts,
-                "/f",
-            ])
-            .output();
+        if !reg_add(&settings_key, "ProxyOverride", "REG_SZ", PROXY_OVERRIDE_HOSTS) {
+            anyhow::bail!("写入 ProxyOverride 失败: {}", settings_key);
+        }
 
+        // Refreshes WinINET in this process; clients in the user's session pick the new
+        // value up when they next read the settings (usually after a restart).
         refresh_wininet_proxy();
+
+        // `reg add` can succeed while the hive keeps the old value, so verify the switch
+        // before reporting success to the panel.
+        if reg_query_dword(&settings_key, "ProxyEnable") != Some(1) {
+            anyhow::bail!("系统代理写入后回读校验未通过: {}", settings_key);
+        }
+
+        Ok(())
     }
 
-    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) {
-        let _ = std::process::Command::new("reg")
-            .args([
-                "add",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+    fn disable_system_proxy(&self, _sudo_pass: Option<&str>) -> Result<()> {
+        // Nothing was ever set if the desktop user cannot be resolved.
+        let Some(root) = proxy_hive_root() else {
+            return Ok(());
+        };
+
+        let settings_key = proxy_settings_key(&root);
+
+        // Preferred path: put the user's own proxy configuration back verbatim.
+        if restore_proxy_backup(&root, &settings_key)? {
+            refresh_wininet_proxy();
+            return Ok(());
+        }
+
+        // No snapshot (e.g. enabled by an older build): at least switch ours off.
+        if !reg_add(&settings_key, "ProxyEnable", "REG_DWORD", "0") {
+            anyhow::bail!("关闭系统代理失败: {}", settings_key);
+        }
 
         refresh_wininet_proxy();
+
+        if reg_query_dword(&settings_key, "ProxyEnable") == Some(1) {
+            anyhow::bail!("系统代理关闭后回读校验未通过: {}", settings_key);
+        }
+
+        Ok(())
+    }
+
+    fn restore_stale_system_proxy(&self, _sudo_pass: Option<&str>) -> Result<()> {
+        // A leftover snapshot means the previous run was killed before it could restore the
+        // user's proxy; that proxy now points at a port nobody listens on.
+        let Some(root) = proxy_hive_root() else {
+            return Ok(());
+        };
+
+        let settings_key = proxy_settings_key(&root);
+
+        if restore_proxy_backup(&root, &settings_key)? {
+            refresh_wininet_proxy();
+        }
+
+        Ok(())
     }
 
     fn enable_tun_dns(&self, _dns_ip: &str, _sudo_pass: Option<&str>) {}
@@ -695,6 +999,198 @@ pub fn refresh_wininet_proxy() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_proxy_enable_dword_from_reg_query_output() {
+        let output = "\r\nHKEY_USERS\\S-1-5-21-1-2-3-1001\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\n    ProxyEnable    REG_DWORD    0x1\r\n\r\n";
+
+        assert_eq!(parse_reg_dword(output, "ProxyEnable"), Some(1));
+        assert_eq!(parse_reg_dword(output, "ProxyServer"), None);
+    }
+
+    #[test]
+    fn parses_disabled_and_missing_proxy_switch() {
+        let disabled = "    ProxyEnable    REG_DWORD    0x0\r\n";
+        assert_eq!(parse_reg_dword(disabled, "ProxyEnable"), Some(0));
+
+        // A hive that silently kept the old value (or was never written) has no such line.
+        assert_eq!(parse_reg_dword("", "ProxyEnable"), None);
+        assert_eq!(parse_reg_dword("noise\r\n", "ProxyEnable"), None);
+    }
+
+    /// Snapshot of the current user's WinINET settings plus Subout's backup key, restored on
+    /// drop so a panicking assertion still leaves the machine's network settings untouched.
+    struct ProxySnapshot {
+        settings_key: String,
+        backup_key: String,
+        enable: Option<u32>,
+        server: Option<String>,
+        override_hosts: Option<String>,
+    }
+
+    impl ProxySnapshot {
+        fn capture(root: &str) -> Self {
+            let settings_key = proxy_settings_key(root);
+
+            Self {
+                enable: reg_query_dword(&settings_key, "ProxyEnable"),
+                server: reg_query_string(&settings_key, "ProxyServer"),
+                override_hosts: reg_query_string(&settings_key, "ProxyOverride"),
+                backup_key: proxy_backup_key(root),
+                settings_key,
+            }
+        }
+    }
+
+    impl Drop for ProxySnapshot {
+        fn drop(&mut self) {
+            for (name, value) in [
+                ("ProxyServer", self.server.as_deref()),
+                ("ProxyOverride", self.override_hosts.as_deref()),
+            ] {
+                match value {
+                    Some(value) => {
+                        reg_add(&self.settings_key, name, "REG_SZ", value);
+                    }
+                    None => {
+                        reg_delete(&self.settings_key, name);
+                    }
+                }
+            }
+
+            match self.enable {
+                Some(value) => {
+                    reg_add(
+                        &self.settings_key,
+                        "ProxyEnable",
+                        "REG_DWORD",
+                        &value.to_string(),
+                    );
+                }
+                None => {
+                    reg_delete(&self.settings_key, "ProxyEnable");
+                }
+            }
+
+            // Never leave the test's snapshot behind.
+            for name in ["Saved", "ProxyEnable", "ProxyServer", "ProxyOverride"] {
+                reg_delete(&self.backup_key, name);
+            }
+        }
+    }
+
+    /// Opt-in integration check: exercises the real proxy switch, the snapshot it takes and
+    /// the crash-recovery path. Run with `cargo test -- --ignored proxy_switch_round_trip`.
+    #[test]
+    #[ignore = "改写当前用户的 WinINET 代理设置，仅在需要人工验证时运行"]
+    fn proxy_switch_round_trip_targets_the_desktop_hive() {
+        if !cfg!(windows) || running_as_system_account() {
+            // Under SYSTEM the whole point of the fix is that HKCU is NOT the desktop hive.
+            return;
+        }
+
+        let root = proxy_hive_root().expect("interactive user hive must resolve");
+        assert!(
+            root.starts_with("HKU\\") || root == "HKCU",
+            "unexpected hive root: {root}"
+        );
+
+        let settings_key = proxy_settings_key(&root);
+        let backup_key = proxy_backup_key(&root);
+
+        let _snapshot = ProxySnapshot::capture(&root);
+
+        // Pretend the user already runs their own proxy on 10808.
+        reg_add(&settings_key, "ProxyEnable", "REG_DWORD", "0");
+        reg_add(&settings_key, "ProxyServer", "REG_SZ", "127.0.0.1:10808");
+        reg_delete(&backup_key, "Saved");
+
+        // Enable: Subout takes the proxy over and remembers the original server.
+        WindowsPlatform
+            .enable_system_proxy(50443, None)
+            .expect("enable_system_proxy should succeed for the interactive user");
+        assert_eq!(reg_query_dword(&settings_key, "ProxyEnable"), Some(1));
+        assert_eq!(
+            reg_query_string(&settings_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:50443")
+        );
+        assert_eq!(
+            reg_query_dword(&backup_key, "Saved"),
+            Some(1),
+            "the user's settings must be backed up"
+        );
+        assert_eq!(
+            reg_query_string(&backup_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:10808")
+        );
+
+        // A second enable must not overwrite the snapshot with Subout's own value.
+        WindowsPlatform
+            .enable_system_proxy(50443, None)
+            .expect("second enable should succeed");
+        assert_eq!(
+            reg_query_string(&backup_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:10808"),
+            "the snapshot must keep the real original"
+        );
+
+        // Disable: the user's own proxy configuration comes back verbatim.
+        WindowsPlatform
+            .disable_system_proxy(None)
+            .expect("disable_system_proxy should succeed");
+        assert_eq!(
+            reg_query_string(&settings_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:10808"),
+            "the original proxy server must be restored"
+        );
+        assert_eq!(reg_query_dword(&settings_key, "ProxyEnable"), Some(0));
+        assert_eq!(
+            reg_query_dword(&backup_key, "Saved"),
+            None,
+            "the snapshot must be consumed"
+        );
+
+        // Crash recovery: enable, "crash" (no disable), then let startup roll it back.
+        WindowsPlatform
+            .enable_system_proxy(50444, None)
+            .expect("enable before simulated crash");
+        assert_eq!(
+            reg_query_string(&settings_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:50444")
+        );
+
+        WindowsPlatform
+            .restore_stale_system_proxy(None)
+            .expect("stale proxy repair should succeed");
+        assert_eq!(
+            reg_query_string(&settings_key, "ProxyServer").as_deref(),
+            Some("127.0.0.1:10808"),
+            "a leftover snapshot must be rolled back on startup"
+        );
+        assert_eq!(reg_query_dword(&settings_key, "ProxyEnable"), Some(0));
+    }
+
+    #[test]
+    fn parses_proxy_server_string_from_reg_query_output() {
+        let output = "HKEY_USERS\\S-1-5-21-1-2-3-1001\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\n    ProxyServer    REG_SZ    127.0.0.1:10808\r\n\r\n";
+        assert_eq!(
+            parse_reg_string(output, "ProxyServer").as_deref(),
+            Some("127.0.0.1:10808")
+        );
+
+        // An empty REG_SZ reads back as an empty string, not as "absent".
+        let empty = "    ProxyServer    REG_SZ    \r\n";
+        assert_eq!(parse_reg_string(empty, "ProxyServer").as_deref(), Some(""));
+
+        // Values with spaces (proxy overrides commonly have them) are preserved.
+        let spaced = "    ProxyOverride    REG_SZ    <local>;10.*;172.16.*\r\n";
+        assert_eq!(
+            parse_reg_string(spaced, "ProxyOverride").as_deref(),
+            Some("<local>;10.*;172.16.*")
+        );
+
+        assert_eq!(parse_reg_string("", "ProxyServer"), None);
+    }
 
     #[test]
     fn test_parse_cim_process_json_empty_and_invalid() {

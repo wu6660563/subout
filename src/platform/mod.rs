@@ -13,6 +13,17 @@ use crate::service::ConflictingProcessInfo;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Whether a process name (from `ps`/`/proc/<pid>/comm`/CIM) is a sing-box kernel binary.
+///
+/// Process cleanup matches on the config path in argv, which also appears in the command
+/// line of anyone who merely *opened* that file (`vim /var/lib/subout/generated/sing-box.json`,
+/// `tail -f ...`). Requiring the executable name keeps the daemon from killing editors.
+pub fn is_singbox_process_name(name: &str) -> bool {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+
+    matches!(name, "sing-box" | "singbox" | "sing-box.exe" | "singbox.exe")
+}
+
 /// Strategy pattern interface for platform-specific capabilities.
 ///
 /// Encapsulates all OS-dependent operations (privilege escalation, process lifecycle,
@@ -76,9 +87,30 @@ pub trait PlatformStrategy: Send + Sync {
 
     // ------------------------------------------------------------------------
     // 4. System Proxy & DNS Integration
+    //
+    // The proxy helpers report failure instead of pretending success: a silent no-op
+    // here leaves the panel claiming "系统代理已开启" while every browser keeps going
+    // direct (or worse, pointing at a dead port).
     // ------------------------------------------------------------------------
-    fn enable_system_proxy(&self, port: u16, sudo_pass: Option<&str>);
-    fn disable_system_proxy(&self, sudo_pass: Option<&str>);
+    fn enable_system_proxy(&self, port: u16, sudo_pass: Option<&str>) -> Result<()>;
+    fn disable_system_proxy(&self, sudo_pass: Option<&str>) -> Result<()>;
+
+    /// Roll back a system proxy left behind by a run that could not shut down cleanly
+    /// (crash / force-kill), where the proxy now points at a port nobody serves.
+    ///
+    /// Platforms that keep the pre-Subout settings only in memory have nothing to restore.
+    fn restore_stale_system_proxy(&self, _sudo_pass: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether this session can be steered at all.
+    ///
+    /// Headless Linux (systemd, no desktop session) has no desktop-wide proxy to set, and
+    /// `enable_system_proxy` is a no-op there. Reporting that honestly is better than
+    /// logging "系统代理已开启" while nothing changed.
+    fn supports_system_proxy(&self) -> bool {
+        true
+    }
     fn enable_tun_dns(&self, dns_ip: &str, sudo_pass: Option<&str>);
     fn disable_tun_dns(&self, sudo_pass: Option<&str>);
 
@@ -154,6 +186,18 @@ pub fn fallback_platform() -> &'static fallback::FallbackPlatform {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn singbox_process_name_matching_is_precise() {
+        for name in ["sing-box", "singbox", "/usr/local/bin/sing-box", "C:\\bin\\sing-box.exe"] {
+            assert!(is_singbox_process_name(name), "{name} should match");
+        }
+
+        // These are the false positives that used to be killed together with the kernel.
+        for name in ["vim", "tail", "less", "grep", "sudo", "bash", "", "sing-box-helper"] {
+            assert!(!is_singbox_process_name(name), "{name} must not match");
+        }
+    }
 
     #[test]
     fn test_linux_strategy() {
