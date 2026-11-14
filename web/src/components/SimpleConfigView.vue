@@ -159,6 +159,129 @@
         </label>
       </div>
 
+      <!-- Rule-set Configuration Section -->
+      <div class="ruleset-config-box" style="margin-top: 1rem; padding: 0.85rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card);">
+        <div class="flex items-center justify-between" style="cursor: pointer" @click="showRuleSetSettings = !showRuleSetSettings">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span style="font-size: 1rem">📦</span>
+            <span style="font-weight: 600; font-size: 0.88rem; color: var(--text-main);">分流规则集 (Rule-set) 镜像与通道</span>
+            <span class="badge badge-info" style="font-size: 0.75rem">{{ currentRuleSetSourceLabel }}</span>
+            <span
+              v-if="ruleSetsStatusList.length > 0"
+              class="badge"
+              :class="cachedRuleSetsCount === ruleSetsStatusList.length ? 'badge-success' : 'badge-warning'"
+              style="font-size: 0.72rem"
+            >
+              {{ cachedRuleSetsCount === ruleSetsStatusList.length ? '✓ 本地缓存已就绪' : `☁ 缓存 ${cachedRuleSetsCount}/${ruleSetsStatusList.length}` }}
+            </span>
+          </div>
+          <span style="color: var(--text-muted); font-size: 0.82rem">
+            {{ showRuleSetSettings ? '▲ 收起' : '▼ 展开设置' }}
+          </span>
+        </div>
+
+        <div v-show="showRuleSetSettings" style="margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.75rem;">
+          <div class="flex flex-wrap gap-3 items-center">
+            <div style="flex: 1; min-width: 220px;">
+              <label style="display: block; font-size: 0.78rem; font-weight: 500; margin-bottom: 0.3rem; color: var(--text-main);">
+                规则集下载源 (Provider)
+              </label>
+              <select v-model="form.route.rule_set_source" class="input-select" style="width: 100%; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-input); font-size: 0.82rem; color: var(--text-main);">
+                <option v-for="opt in ruleSetSourceOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </div>
+
+            <div style="flex: 1; min-width: 220px;">
+              <label style="display: block; font-size: 0.78rem; font-weight: 500; margin-bottom: 0.3rem; color: var(--text-main);">
+                规则集下载通道 (Download Detour)
+              </label>
+              <select v-model="form.route.rule_set_detour" class="input-select" style="width: 100%; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-input); font-size: 0.82rem; color: var(--text-main);">
+                <option value="auto">🔄 智能模式（境外经代理，境内直连）</option>
+                <option value="proxy">✈️ 强制全部经代理下载（推荐直连不通时开启）</option>
+                <option value="direct">🟢 强制全部直连下载</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 自定义 URL 区域 -->
+          <div v-if="form.route.rule_set_source === 'custom'" style="margin-top: 0.25rem; padding: 0.75rem; border-radius: 6px; background: var(--bg-sub); border: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 0.5rem;">
+            <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.15rem;">
+              💡 留空的条目将自动使用默认 CDN 规则集地址：
+            </div>
+            <div>
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 2px;">大陆域名规则集 (geosite-cn):</label>
+              <input v-model="form.route.custom_rule_sets.geosite_cn_url" type="text" class="input-text" placeholder="https://.../geosite-cn.srs" style="width: 100%; padding: 0.35rem 0.6rem; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-main);" />
+            </div>
+            <div>
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 2px;">非大陆域名规则集 (geosite-geolocation-!cn):</label>
+              <input v-model="form.route.custom_rule_sets.geosite_geolocation_not_cn_url" type="text" class="input-text" placeholder="https://.../geosite-geolocation-!cn.srs" style="width: 100%; padding: 0.35rem 0.6rem; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-main);" />
+            </div>
+            <div>
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 2px;">大陆 IP 规则集 (geoip-cn):</label>
+              <input v-model="form.route.custom_rule_sets.geoip_cn_url" type="text" class="input-text" placeholder="https://.../geoip-cn.srs" style="width: 100%; padding: 0.35rem 0.6rem; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-main);" />
+            </div>
+            <div v-if="form.route.block_ads">
+              <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 2px;">广告拦截规则集 (geosite-category-ads-all):</label>
+              <input v-model="form.route.custom_rule_sets.geosite_ads_url" type="text" class="input-text" placeholder="https://.../geosite-category-ads-all.srs" style="width: 100%; padding: 0.35rem 0.6rem; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-main);" />
+            </div>
+          </div>
+
+          <!-- 规则集本地持久化与预下载缓存 -->
+          <div style="margin-top: 0.5rem; padding-top: 0.65rem; border-top: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 0.6rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+              <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; font-weight: 500; cursor: pointer; color: var(--text-main);">
+                <input type="checkbox" v-model="form.route.use_local_rule_sets" />
+                <span>🚀 优先使用本地缓存规则集（秒级极速冷启动，彻底免除联网报错）</span>
+              </label>
+              <button
+                type="button"
+                class="btn btn-secondary"
+                style="padding: 0.3rem 0.7rem; font-size: 0.78rem; display: flex; align-items: center; gap: 5px;"
+                :disabled="isCachingRuleSets"
+                @click="cacheRuleSets()"
+              >
+                <span>{{ isCachingRuleSets ? '⏳ 正在拉取规则集...' : '📥 立即预下载/更新全部规则集' }}</span>
+              </button>
+            </div>
+
+            <div style="font-size: 0.76rem; color: var(--text-muted); line-height: 1.45;">
+              💡 规则集成功下载落盘后，内核配置将自动转为 <code>type: local</code> 并引用本地二进制路径。sing-box 启动阶段无需网络请求，既杜绝了 CDN 超时或不可达引发的致命报错，又使服务冷启动缩短至数十毫秒。
+            </div>
+
+            <!-- 各规则集本地缓存状态明细 -->
+            <div v-if="ruleSetsStatusList.length > 0" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.5rem; margin-top: 0.2rem;">
+              <div
+                v-for="rs in ruleSetsStatusList"
+                :key="rs.tag"
+                style="padding: 0.5rem 0.7rem; border-radius: 6px; background: var(--bg-sub); border: 1px solid var(--border-color); display: flex; flex-direction: column; justify-content: space-between; gap: 0.3rem;"
+              >
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-main); font-family: monospace;">{{ rs.tag }}</span>
+                  <span
+                    class="badge"
+                    :class="rs.cached ? 'badge-success' : 'badge-warning'"
+                    style="font-size: 0.7rem; padding: 2px 6px;"
+                  >
+                    {{ rs.cached ? '✓ 已本地缓存' : '☁ 远程拉取' }}
+                  </span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted);">
+                  <span>{{ rs.cached && rs.size ? formatFileSize(rs.size) : '未持久化' }}</span>
+                  <button
+                    type="button"
+                    style="background: transparent; border: none; color: var(--primary-color, #3b82f6); cursor: pointer; padding: 0; font-size: 0.72rem; text-decoration: underline;"
+                    :disabled="isCachingRuleSets"
+                    @click="cacheRuleSets(rs.tag)"
+                  >
+                    {{ rs.cached ? '重新拉取' : '立即下载' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Outbound Exit Strategy & Node Selection -->
       <div class="outbound-box">
         <div
@@ -1273,6 +1396,23 @@ const isAutoTest = computed(
     form.route.default_outbound === "AUTO-Test" || !form.route.default_outbound,
 );
 
+const showRuleSetSettings = ref(false);
+
+const ruleSetSourceOptions = [
+  { value: "jsdelivr", label: "⚡ jsDelivr CDN 镜像（默认推荐）" },
+  { value: "ghproxy", label: "🚀 国内加速镜像 (GHProxy 代理)" },
+  { value: "github", label: "🐙 GitHub 官方源 (配合代理使用)" },
+  { value: "metacubex", label: "🧩 MetaCubeX 规则源 (高频维护)" },
+  { value: "custom", label: "🛠️ 自定义规则集 URL (手动填写)" },
+];
+
+const currentRuleSetSourceLabel = computed(() => {
+  const found = ruleSetSourceOptions.find(
+    (o) => o.value === form.route.rule_set_source,
+  );
+  return found ? found.label.split(" ")[1] : "jsDelivr";
+});
+
 const setOutboundMode = (mode) => {
   if (mode === "direct") {
     form.route.default_outbound = "direct";
@@ -1313,6 +1453,15 @@ const form = reactive({
     block_ads: true,
     bypass_lan: true,
     default_outbound: "AUTO-Test",
+    rule_set_source: "jsdelivr",
+    rule_set_detour: "auto",
+    use_local_rule_sets: true,
+    custom_rule_sets: {
+      geosite_cn_url: "",
+      geosite_geolocation_not_cn_url: "",
+      geoip_cn_url: "",
+      geosite_ads_url: "",
+    },
   },
 });
 
@@ -1371,6 +1520,64 @@ const syncSubscriptions = async () => {
   }
 };
 
+const ruleSetsStatusList = ref([]);
+const isCachingRuleSets = ref(false);
+
+const cachedRuleSetsCount = computed(() => {
+  return ruleSetsStatusList.value.filter((r) => r.cached).length;
+});
+
+const formatFileSize = (bytes) => {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+};
+
+const loadRuleSetsStatus = async () => {
+  try {
+    const res = await fetch(`${API_BASE}/api/simple-config/rulesets`, {
+      headers: { Authorization: `Bearer ${token.value}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        ruleSetsStatusList.value = data;
+      }
+    }
+  } catch (e) {
+    console.error("加载规则集状态失败:", e);
+  }
+};
+
+const cacheRuleSets = async (tag = null) => {
+  isCachingRuleSets.value = true;
+  try {
+    const body = tag ? { tag } : {};
+    const res = await fetch(`${API_BASE}/api/simple-config/rulesets/cache`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token.value}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (res.ok) {
+      if (Array.isArray(result.rulesets)) {
+        ruleSetsStatusList.value = result.rulesets;
+      }
+      showToast(result.message || "规则集已成功缓存到本地！", "success");
+    } else {
+      showToast(result.message || "下载规则集失败", "danger");
+    }
+  } catch {
+    showToast("请求下载规则集网络异常", "danger");
+  } finally {
+    isCachingRuleSets.value = false;
+  }
+};
+
 const loadSimpleConfig = async () => {
   try {
     const res = await fetch(`${API_BASE}/api/simple-config`, {
@@ -1392,6 +1599,28 @@ const loadSimpleConfig = async () => {
         Object.assign(form.route, data.config.route);
         if (!form.route.default_outbound) {
           form.route.default_outbound = "AUTO-Test";
+        }
+        if (!form.route.rule_set_source) {
+          form.route.rule_set_source = "jsdelivr";
+        }
+        if (!form.route.rule_set_detour) {
+          form.route.rule_set_detour = "auto";
+        }
+        if (data.config.route.use_local_rule_sets !== undefined) {
+          form.route.use_local_rule_sets = !!data.config.route.use_local_rule_sets;
+        } else {
+          form.route.use_local_rule_sets = true;
+        }
+        if (Array.isArray(data.rulesets)) {
+          ruleSetsStatusList.value = data.rulesets;
+        }
+        if (!form.route.custom_rule_sets) {
+          form.route.custom_rule_sets = {
+            geosite_cn_url: "",
+            geosite_geolocation_not_cn_url: "",
+            geoip_cn_url: "",
+            geosite_ads_url: "",
+          };
         }
       }
       generatedPreview.value = data.generated || {};

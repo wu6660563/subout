@@ -12,6 +12,7 @@ pub enum Outbound {
     Shadowsocks(ShadowsocksOutbound),
     Hysteria(HysteriaOutbound),
     Hysteria2(Hysteria2Outbound),
+    Tuic(TuicOutbound),
 }
 
 impl Outbound {
@@ -26,6 +27,7 @@ impl Outbound {
             Outbound::Shadowsocks(o) => &o.tag,
             Outbound::Hysteria(o) => &o.tag,
             Outbound::Hysteria2(o) => &o.tag,
+            Outbound::Tuic(o) => &o.tag,
         }
     }
 
@@ -40,6 +42,7 @@ impl Outbound {
             Outbound::Shadowsocks(o) => o.tag = new_tag,
             Outbound::Hysteria(o) => o.tag = new_tag,
             Outbound::Hysteria2(o) => o.tag = new_tag,
+            Outbound::Tuic(o) => o.tag = new_tag,
         }
     }
 
@@ -54,6 +57,7 @@ impl Outbound {
             Outbound::Shadowsocks(o) => &o.server,
             Outbound::Hysteria(o) => &o.server,
             Outbound::Hysteria2(o) => &o.server,
+            Outbound::Tuic(o) => &o.server,
         }
     }
 
@@ -68,6 +72,7 @@ impl Outbound {
             Outbound::Shadowsocks(_) => &None,
             Outbound::Hysteria(o) => &o.tls,
             Outbound::Hysteria2(o) => &o.tls,
+            Outbound::Tuic(o) => &o.tls,
         };
         if let Some(t) = tls {
             t.insecure.unwrap_or(false)
@@ -125,11 +130,13 @@ impl Outbound {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct TlsConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpn: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +275,29 @@ pub struct Hysteria2Outbound {
     pub down_mbps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub obfs: Option<Hysteria2Obfs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TuicOutbound {
+    pub tag: String,
+    pub server: String,
+    pub server_port: u16,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub congestion_control: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_relay_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_over_stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zero_rtt_handshake: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsConfig>,
 }

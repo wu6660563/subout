@@ -44,12 +44,40 @@ impl Default for SimpleInboundConfig {
     }
 }
 
+fn default_rule_set_source() -> String {
+    "jsdelivr".to_string()
+}
+
+fn default_rule_set_detour() -> String {
+    "auto".to_string()
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+pub struct SimpleCustomRuleSets {
+    #[serde(default)]
+    pub geosite_cn_url: Option<String>,
+    #[serde(default)]
+    pub geosite_geolocation_not_cn_url: Option<String>,
+    #[serde(default)]
+    pub geoip_cn_url: Option<String>,
+    #[serde(default)]
+    pub geosite_ads_url: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct SimpleRouteConfig {
     pub mode: String, // "smart" (白名单/绕过大陆) | "global" (全局代理) | "gfw" (仅代理被阻断)
     pub block_ads: bool,
     pub bypass_lan: bool,
     pub default_outbound: String, // "AUTO-Test" | "proxy" | "direct"
+    #[serde(default = "default_rule_set_source")]
+    pub rule_set_source: String, // "jsdelivr" | "ghproxy" | "github" | "metacubex" | "custom"
+    #[serde(default = "default_rule_set_detour")]
+    pub rule_set_detour: String, // "auto" | "proxy" | "direct"
+    #[serde(default)]
+    pub custom_rule_sets: Option<SimpleCustomRuleSets>,
+    #[serde(default = "default_true")]
+    pub use_local_rule_sets: bool,
 }
 
 impl Default for SimpleRouteConfig {
@@ -59,9 +87,319 @@ impl Default for SimpleRouteConfig {
             block_ads: true,
             bypass_lan: true,
             default_outbound: "AUTO-Test".to_string(),
+            rule_set_source: default_rule_set_source(),
+            rule_set_detour: default_rule_set_detour(),
+            custom_rule_sets: None,
+            use_local_rule_sets: true,
         }
     }
 }
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct RuleSetStatusInfo {
+    pub tag: String,
+    pub cached: bool,
+    pub size: Option<u64>,
+    pub updated_at: Option<i64>,
+    pub path: String,
+    pub url: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedRuleSetUrls {
+    pub geosite_cn: String,
+    pub geosite_geolocation_not_cn: String,
+    pub geoip_cn: String,
+    pub geosite_ads: String,
+}
+
+pub fn resolve_rule_set_urls(cfg: &SimpleRouteConfig) -> ResolvedRuleSetUrls {
+    let source = cfg.rule_set_source.trim().to_lowercase();
+    let mut urls = match source.as_str() {
+        "github" => ResolvedRuleSetUrls {
+            geosite_cn: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs".to_string(),
+            geosite_geolocation_not_cn: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs".to_string(),
+            geoip_cn: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs".to_string(),
+            geosite_ads: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs".to_string(),
+        },
+        "ghproxy" => ResolvedRuleSetUrls {
+            geosite_cn: "https://ghp.ci/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs".to_string(),
+            geosite_geolocation_not_cn: "https://ghp.ci/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs".to_string(),
+            geoip_cn: "https://ghp.ci/https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs".to_string(),
+            geosite_ads: "https://ghp.ci/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs".to_string(),
+        },
+        "metacubex" => ResolvedRuleSetUrls {
+            geosite_cn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs".to_string(),
+            geosite_geolocation_not_cn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/geolocation-!cn.srs".to_string(),
+            geoip_cn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs".to_string(),
+            geosite_ads: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/category-ads-all.srs".to_string(),
+        },
+        _ => ResolvedRuleSetUrls {
+            geosite_cn: "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs".to_string(),
+            geosite_geolocation_not_cn: "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-!cn.srs".to_string(),
+            geoip_cn: "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs".to_string(),
+            geosite_ads: "https://testingcf.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ads-all.srs".to_string(),
+        },
+    };
+
+    if let Some(ref custom) = cfg.custom_rule_sets {
+        if let Some(ref url) = custom.geosite_cn_url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                urls.geosite_cn = trimmed.to_string();
+            }
+        }
+        if let Some(ref url) = custom.geosite_geolocation_not_cn_url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                urls.geosite_geolocation_not_cn = trimmed.to_string();
+            }
+        }
+        if let Some(ref url) = custom.geoip_cn_url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                urls.geoip_cn = trimmed.to_string();
+            }
+        }
+        if let Some(ref url) = custom.geosite_ads_url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                urls.geosite_ads = trimmed.to_string();
+            }
+        }
+    }
+
+    urls
+}
+
+pub fn resolve_download_detours(
+    cfg: &SimpleRouteConfig,
+    has_nodes: bool,
+    target_proxy: &str,
+) -> (&'static str, &'static str) {
+    let can_proxy = has_nodes && target_proxy != "direct";
+    if !can_proxy {
+        return ("direct", "direct");
+    }
+
+    match cfg.rule_set_detour.trim().to_lowercase().as_str() {
+        "proxy" => ("proxy", "proxy"),
+        "direct" => ("direct", "direct"),
+        _ => {
+            let cn_detour = if cfg.rule_set_source.trim().eq_ignore_ascii_case("github") {
+                "proxy"
+            } else {
+                "direct"
+            };
+            (cn_detour, "proxy")
+        }
+    }
+}
+
+/// 查询当前小白模式规则集的本地缓存与配置状态
+pub fn get_rule_sets_status(route_cfg: &SimpleRouteConfig) -> Vec<RuleSetStatusInfo> {
+    let urls = resolve_rule_set_urls(route_cfg);
+    let mut targets = vec![
+        ("geosite-cn", urls.geosite_cn),
+        ("geosite-geolocation-!cn", urls.geosite_geolocation_not_cn),
+        ("geoip-cn", urls.geoip_cn),
+    ];
+    if route_cfg.block_ads {
+        targets.push(("geosite-category-ads-all", urls.geosite_ads));
+    }
+
+    targets
+        .into_iter()
+        .map(|(tag, url)| {
+            let path_buf = crate::paths::AppPaths::get().ruleset_file_path(tag);
+            let path_str = path_buf.to_string_lossy().replace('\\', "/");
+            let (cached, size, updated_at) = if path_buf.is_file() {
+                if let Ok(meta) = std::fs::metadata(&path_buf) {
+                    let len = meta.len();
+                    if len > 0 {
+                        let mtime = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64);
+                        (true, Some(len), mtime)
+                    } else {
+                        (false, None, None)
+                    }
+                } else {
+                    (false, None, None)
+                }
+            } else {
+                (false, None, None)
+            };
+
+            RuleSetStatusInfo {
+                tag: tag.to_string(),
+                cached,
+                size,
+                updated_at,
+                path: path_str,
+                url,
+            }
+        })
+        .collect()
+}
+
+/// 根据本地缓存状态与用户偏好，组装单个 rule_set 项（优先 local，缺失降级 remote）
+pub fn build_rule_set_entry(
+    tag: &str,
+    url: &str,
+    detour: &str,
+    use_local_rule_sets: bool,
+) -> serde_json::Value {
+    if use_local_rule_sets {
+        let path_buf = crate::paths::AppPaths::get().ruleset_file_path(tag);
+        if path_buf.is_file() {
+            if let Ok(meta) = std::fs::metadata(&path_buf) {
+                if meta.len() > 0 {
+                    let path_str = path_buf.to_string_lossy().replace('\\', "/");
+                    return json!({
+                        "tag": tag,
+                        "type": "local",
+                        "format": "binary",
+                        "path": path_str
+                    });
+                }
+            }
+        }
+    }
+
+    json!({
+        "tag": tag,
+        "type": "remote",
+        "format": "binary",
+        "url": url,
+        "download_detour": detour,
+        "update_interval": "1d"
+    })
+}
+
+/// 下载并缓存单个规则集二进制文件到本地 `<data_dir>/rulesets/<tag>.srs`
+pub async fn download_and_cache_rule_set(
+    tag: &str,
+    url: &str,
+    proxy_port: Option<u16>,
+) -> Result<RuleSetStatusInfo, String> {
+    let paths = crate::paths::AppPaths::get();
+    let rulesets_dir = paths.rulesets_dir();
+    let _ = std::fs::create_dir_all(&rulesets_dir);
+
+    let target_path = paths.ruleset_file_path(tag);
+    let tmp_path = rulesets_dir.join(format!("{}.srs.tmp", tag));
+
+    // 1. 发起下载，优先直连，失败且配置了 proxy_port 时尝试本地代理重试
+    let bytes = fetch_rule_set_bytes(url, proxy_port).await?;
+
+    // 2. 校验文件基本尺寸与内容
+    if bytes.len() < 512 {
+        return Err(format!(
+            "下载的规则集 {} 文件过小 ({} 字节)，可能非有效 SRS 二进制",
+            tag,
+            bytes.len()
+        ));
+    }
+    let head = &bytes[..bytes.len().min(128)];
+    let head_str = String::from_utf8_lossy(head).to_lowercase();
+    if head_str.contains("<!doctype") || head_str.contains("<html") || head_str.contains("<head") {
+        return Err(format!(
+            "下载的规则集 {} 返回了 HTML 网页而非有效二进制",
+            tag
+        ));
+    }
+
+    // 3. 写入临时文件并原子替换
+    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+        return Err(format!("写入临时文件失败: {}", e));
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("替换目标规则集文件失败: {}", e));
+    }
+
+    let file_size = bytes.len() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .ok();
+
+    Ok(RuleSetStatusInfo {
+        tag: tag.to_string(),
+        cached: true,
+        size: Some(file_size),
+        updated_at: now,
+        path: target_path.to_string_lossy().replace('\\', "/"),
+        url: url.to_string(),
+    })
+}
+
+async fn fetch_rule_set_bytes(url: &str, proxy_port: Option<u16>) -> Result<Vec<u8>, String> {
+    match fetch_rule_set_http_once(url, None).await {
+        Ok(bytes) => Ok(bytes),
+        Err(direct_err) => {
+            if let Some(port) = proxy_port {
+                let proxy_url = format!("http://127.0.0.1:{}", port);
+                fetch_rule_set_http_once(url, Some(&proxy_url))
+                    .await
+                    .map_err(|proxy_err| {
+                        format!("直连下载失败 ({})，代理下载亦失败 ({})", direct_err, proxy_err)
+                    })
+            } else {
+                Err(format!("直连下载失败: {}", direct_err))
+            }
+        }
+    }
+}
+
+async fn fetch_rule_set_http_once(url: &str, proxy_url: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(15));
+
+    if let Some(proxy) = proxy_url {
+        let p = reqwest::Proxy::all(proxy).map_err(|e| format!("代理地址无效: {}", e))?;
+        builder = builder.proxy(p);
+    }
+
+    let client = builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("HTTP 请求失败: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP 状态码异常: {}", resp.status()));
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| format!("读取响应数据失败: {}", e))?;
+    Ok(bytes.to_vec())
+}
+
+/// 批量下载当前路由配置涉及的所有规则集
+pub async fn download_and_cache_all_rule_sets(
+    route_cfg: &SimpleRouteConfig,
+    proxy_port: Option<u16>,
+) -> Vec<Result<RuleSetStatusInfo, String>> {
+    let urls = resolve_rule_set_urls(route_cfg);
+    let mut targets = vec![
+        ("geosite-cn", urls.geosite_cn),
+        ("geosite-geolocation-!cn", urls.geosite_geolocation_not_cn),
+        ("geoip-cn", urls.geoip_cn),
+    ];
+    if route_cfg.block_ads {
+        targets.push(("geosite-category-ads-all", urls.geosite_ads));
+    }
+
+    let mut results = Vec::with_capacity(targets.len());
+    for (tag, url) in targets {
+        let res = download_and_cache_rule_set(tag, &url, proxy_port).await;
+        results.push(res);
+    }
+    results
+}
+
 
 fn default_log_level() -> String {
     "info".to_string()
@@ -549,48 +887,28 @@ pub fn generate_simple_singbox_config(conn: &Connection, cfg: &SimpleConfig) -> 
         }
     }
 
-    let download_detour_remote = if has_nodes && target_proxy != "direct" {
-        "proxy"
-    } else {
-        "direct"
-    };
+    let (cn_detour, remote_detour) = resolve_download_detours(&cfg.route, has_nodes, &target_proxy);
+    let rule_set_urls = resolve_rule_set_urls(&cfg.route);
+    let use_local = cfg.route.use_local_rule_sets;
 
     let mut rule_sets = vec![
-        json!({
-            "tag": "geosite-cn",
-            "type": "remote",
-            "format": "binary",
-            "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs",
-            "download_detour": "direct",
-            "update_interval": "1d"
-        }),
-        json!({
-            "tag": "geosite-geolocation-!cn",
-            "type": "remote",
-            "format": "binary",
-            "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-geolocation-!cn.srs",
-            "download_detour": download_detour_remote,
-            "update_interval": "1d"
-        }),
-        json!({
-            "tag": "geoip-cn",
-            "type": "remote",
-            "format": "binary",
-            "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs",
-            "download_detour": "direct",
-            "update_interval": "1d"
-        }),
+        build_rule_set_entry("geosite-cn", &rule_set_urls.geosite_cn, cn_detour, use_local),
+        build_rule_set_entry(
+            "geosite-geolocation-!cn",
+            &rule_set_urls.geosite_geolocation_not_cn,
+            remote_detour,
+            use_local,
+        ),
+        build_rule_set_entry("geoip-cn", &rule_set_urls.geoip_cn, cn_detour, use_local),
     ];
 
     if cfg.route.block_ads {
-        rule_sets.push(json!({
-            "tag": "geosite-category-ads-all",
-            "type": "remote",
-            "format": "binary",
-            "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-ads-all.srs",
-            "download_detour": download_detour_remote,
-            "update_interval": "1d"
-        }));
+        rule_sets.push(build_rule_set_entry(
+            "geosite-category-ads-all",
+            &rule_set_urls.geosite_ads,
+            remote_detour,
+            use_local,
+        ));
     }
 
     let route_val = json!({
@@ -965,5 +1283,142 @@ mod tests {
             generated_custom["log"]["output"].as_str(),
             Some("sing-box.log")
         );
+    }
+
+    #[test]
+    fn test_resolve_rule_set_urls_and_sources() {
+        let mut cfg = SimpleRouteConfig::default();
+        assert_eq!(cfg.rule_set_source, "jsdelivr");
+        let default_urls = resolve_rule_set_urls(&cfg);
+        assert!(default_urls.geosite_cn.contains("testingcf.jsdelivr.net"));
+        assert!(default_urls.geosite_geolocation_not_cn.contains("geosite-geolocation-!cn.srs"));
+
+        // GitHub raw
+        cfg.rule_set_source = "github".to_string();
+        let gh_urls = resolve_rule_set_urls(&cfg);
+        assert!(gh_urls.geosite_cn.contains("raw.githubusercontent.com"));
+
+        // ghproxy
+        cfg.rule_set_source = "ghproxy".to_string();
+        let proxy_urls = resolve_rule_set_urls(&cfg);
+        assert!(proxy_urls.geosite_cn.contains("ghp.ci"));
+
+        // metacubex
+        cfg.rule_set_source = "metacubex".to_string();
+        let meta_urls = resolve_rule_set_urls(&cfg);
+        assert!(meta_urls.geosite_cn.contains("MetaCubeX/meta-rules-dat"));
+
+        // Custom override single field
+        cfg.rule_set_source = "jsdelivr".to_string();
+        cfg.custom_rule_sets = Some(SimpleCustomRuleSets {
+            geosite_cn_url: Some("https://my-internal-srs.lan/geosite-cn.srs".to_string()),
+            geosite_geolocation_not_cn_url: None,
+            geoip_cn_url: None,
+            geosite_ads_url: None,
+        });
+        let custom_urls = resolve_rule_set_urls(&cfg);
+        assert_eq!(custom_urls.geosite_cn, "https://my-internal-srs.lan/geosite-cn.srs");
+        assert!(custom_urls.geoip_cn.contains("testingcf.jsdelivr.net"));
+    }
+
+    #[test]
+    fn test_rule_set_detour_modes_and_custom_override() {
+        let conn = crate::db::init_db(":memory:").unwrap();
+        crate::db::save_node(
+            &conn,
+            None,
+            "HK-01",
+            "vless",
+            "1.2.3.4",
+            443,
+            &serde_json::json!({
+                "type": "vless",
+                "tag": "HK-01",
+                "server": "1.2.3.4",
+                "server_port": 443,
+                "uuid": "00000000-0000-0000-0000-000000000000"
+            })
+            .to_string(),
+            true,
+            true,
+        )
+        .unwrap();
+
+        let mut cfg = SimpleConfig::default();
+        // 1. Force proxy for all rule_sets
+        cfg.route.rule_set_detour = "proxy".to_string();
+        let gen_proxy = generate_simple_singbox_config(&conn, &cfg).unwrap();
+        let rule_sets = gen_proxy["route"]["rule_set"].as_array().unwrap();
+        for rs in rule_sets {
+            assert_eq!(rs["download_detour"].as_str(), Some("proxy"));
+        }
+
+        // 2. Force direct for all rule_sets
+        cfg.route.rule_set_detour = "direct".to_string();
+        let gen_direct = generate_simple_singbox_config(&conn, &cfg).unwrap();
+        let rule_sets = gen_direct["route"]["rule_set"].as_array().unwrap();
+        for rs in rule_sets {
+            assert_eq!(rs["download_detour"].as_str(), Some("direct"));
+        }
+
+        // 3. Auto mode + github: cn rules auto detour via proxy to prevent direct timeout
+        cfg.route.rule_set_detour = "auto".to_string();
+        cfg.route.rule_set_source = "github".to_string();
+        let gen_gh = generate_simple_singbox_config(&conn, &cfg).unwrap();
+        let rule_sets = gen_gh["route"]["rule_set"].as_array().unwrap();
+        let cn_rs = rule_sets.iter().find(|rs| rs["tag"].as_str() == Some("geosite-cn")).unwrap();
+        assert_eq!(cn_rs["download_detour"].as_str(), Some("proxy"));
+    }
+
+    #[test]
+    fn test_build_rule_set_entry_local_vs_remote() {
+        let tag = "test-rule-tag";
+        let url = "https://example.com/test.srs";
+        let detour = "proxy";
+
+        // 1. When local file does not exist, should produce remote
+        let remote_entry = build_rule_set_entry(tag, url, detour, true);
+        assert_eq!(remote_entry["type"].as_str(), Some("remote"));
+        assert_eq!(remote_entry["url"].as_str(), Some(url));
+        assert_eq!(remote_entry["download_detour"].as_str(), Some(detour));
+        assert_eq!(remote_entry["format"].as_str(), Some("binary"));
+
+        // 2. When local file exists and non-empty, and use_local_rule_sets is true, produce local
+        let file_path = crate::paths::AppPaths::get().ruleset_file_path(tag);
+        let _ = std::fs::create_dir_all(crate::paths::AppPaths::get().rulesets_dir());
+        std::fs::write(&file_path, b"test-binary-srs-data").unwrap();
+
+        let local_entry = build_rule_set_entry(tag, url, detour, true);
+        assert_eq!(local_entry["type"].as_str(), Some("local"));
+        assert_eq!(local_entry["tag"].as_str(), Some(tag));
+        assert_eq!(local_entry["format"].as_str(), Some("binary"));
+        assert!(local_entry.get("url").is_none());
+        assert!(local_entry["path"].as_str().unwrap().contains("test-rule-tag.srs"));
+
+        // 3. When use_local_rule_sets is false, even if local file exists, produce remote
+        let forced_remote_entry = build_rule_set_entry(tag, url, detour, false);
+        assert_eq!(forced_remote_entry["type"].as_str(), Some("remote"));
+        assert_eq!(forced_remote_entry["url"].as_str(), Some(url));
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_get_rule_sets_status_and_defaults() {
+        let mut cfg = SimpleRouteConfig::default();
+        assert!(cfg.use_local_rule_sets);
+
+        // Default has block_ads: true, so 4 rule sets
+        let statuses = get_rule_sets_status(&cfg);
+        assert_eq!(statuses.len(), 4);
+        assert_eq!(statuses[0].tag, "geosite-cn");
+        assert_eq!(statuses[1].tag, "geosite-geolocation-!cn");
+        assert_eq!(statuses[2].tag, "geoip-cn");
+        assert_eq!(statuses[3].tag, "geosite-category-ads-all");
+
+        // When block_ads is disabled, 3 rule sets
+        cfg.block_ads = false;
+        let statuses_no_ads = get_rule_sets_status(&cfg);
+        assert_eq!(statuses_no_ads.len(), 3);
     }
 }

@@ -183,6 +183,7 @@ impl AppPaths {
         let _ = std::fs::create_dir_all(self.generated_dir());
         let _ = std::fs::create_dir_all(self.subscriptions_dir());
         let _ = std::fs::create_dir_all(self.nodes_dir());
+        let _ = std::fs::create_dir_all(self.rulesets_dir());
 
         // Attempt creating config_dir if writable
         let _ = std::fs::create_dir_all(&self.config_dir);
@@ -246,6 +247,16 @@ impl AppPaths {
     pub fn kernel_binary_path(&self) -> PathBuf {
         let binary_name = crate::platform::current_platform().kernel_binary_name();
         self.kernel_dir().join(binary_name)
+    }
+
+    /// Directory for cached rule-set binaries (`<data_dir>/rulesets`)
+    pub fn rulesets_dir(&self) -> PathBuf {
+        self.data_dir.join("rulesets")
+    }
+
+    /// Target file path for a specific cached rule-set binary (`<data_dir>/rulesets/<tag>.srs`)
+    pub fn ruleset_file_path(&self, tag: &str) -> PathBuf {
+        self.rulesets_dir().join(format!("{}.srs", tag))
     }
 
     /// Helper to generate a unique temporary file path inside `runtime_dir` (fallback to data_dir)
@@ -649,5 +660,29 @@ mod tests {
         assert!(is_version_ge("sing-box version 1.14.0", "1.13.0"));
         assert!(is_version_ge("sing-box version 1.12.0", "1.12.0"));
         assert!(!is_version_ge("sing-box version 1.11.8", "1.12.0"));
+    }
+
+    #[test]
+    fn test_rulesets_paths() {
+        let temp_dir = std::env::temp_dir().join(format!("subout_rs_test_{}", std::process::id()));
+        let paths = AppPaths {
+            config_dir: temp_dir.join("config"),
+            data_dir: temp_dir.join("data"),
+            log_dir: temp_dir.join("logs"),
+            runtime_dir: temp_dir.join("run"),
+            custom_singbox_path: None,
+            is_portable: false,
+            is_dev: true,
+        };
+        paths.ensure_dirs().unwrap();
+
+        assert_eq!(paths.rulesets_dir(), temp_dir.join("data").join("rulesets"));
+        assert_eq!(
+            paths.ruleset_file_path("geosite-cn"),
+            temp_dir.join("data").join("rulesets").join("geosite-cn.srs")
+        );
+        assert!(paths.rulesets_dir().is_dir());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

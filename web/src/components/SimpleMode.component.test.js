@@ -1084,3 +1084,106 @@ describe("SiteTestView - Layout & Category Tabs Fixes", () => {
     expect(tabBtns[0].classes()).toContain("active");
   });
 });
+
+describe("SimpleConfigView - Rule Sets Local Caching & Pre-download", () => {
+  it("displays local caching toggle and rulesets cache statuses and triggers download", async () => {
+    let cacheEndpointCalled = false;
+    global.fetch = vi.fn().mockImplementation((url, opts) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/simple-config/rulesets/cache")) {
+        cacheEndpointCalled = true;
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              status: "success",
+              message: "全部规则集下载完成",
+              rulesets: [
+                {
+                  tag: "geosite-cn",
+                  cached: true,
+                  size: 1500000,
+                  updated_at: 1700000000,
+                  path: "C:/rulesets/geosite-cn.srs",
+                  url: "https://example.com/geosite-cn.srs",
+                },
+                {
+                  tag: "geosite-geolocation-!cn",
+                  cached: true,
+                  size: 2500000,
+                  updated_at: 1700000000,
+                  path: "C:/rulesets/geosite-geolocation-!cn.srs",
+                  url: "https://example.com/geosite-geolocation-!cn.srs",
+                },
+              ],
+            }),
+        });
+      }
+      if (urlStr.includes("/api/simple-config")) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              config: {
+                dns: { mode: "preset_fakeip" },
+                inbound: { inbound_type: "tun", mixed_port: 2080 },
+                route: {
+                  mode: "smart",
+                  rule_set_source: "jsdelivr",
+                  rule_set_detour: "auto",
+                  use_local_rule_sets: true,
+                },
+              },
+              generated: {},
+              rulesets: [
+                {
+                  tag: "geosite-cn",
+                  cached: true,
+                  size: 1048576,
+                  updated_at: 1700000000,
+                  path: "C:/rulesets/geosite-cn.srs",
+                  url: "https://example.com/geosite-cn.srs",
+                },
+                {
+                  tag: "geosite-geolocation-!cn",
+                  cached: false,
+                  size: null,
+                  updated_at: null,
+                  path: "C:/rulesets/geosite-geolocation-!cn.srs",
+                  url: "https://example.com/geosite-geolocation-!cn.srs",
+                },
+              ],
+            }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ nodes: [] }),
+      });
+    });
+
+    const wrapper = mount(SimpleConfigView);
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Verify ruleset section contains local caching elements
+    expect(wrapper.text()).toContain("分流规则集 (Rule-set) 镜像与通道");
+    expect(wrapper.text()).toContain("优先使用本地缓存规则集");
+    expect(wrapper.text()).toContain("立即预下载/更新全部规则集");
+
+    // Check status tags
+    expect(wrapper.text()).toContain("geosite-cn");
+    expect(wrapper.text()).toContain("已本地缓存");
+    expect(wrapper.text()).toContain("geosite-geolocation-!cn");
+    expect(wrapper.text()).toContain("远程拉取");
+
+    // Click cache download button
+    const cacheBtn = wrapper
+      .findAll("button")
+      .find((b) => b.text().includes("立即预下载/更新全部规则集"));
+    expect(cacheBtn).toBeDefined();
+    await cacheBtn.trigger("click");
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(cacheEndpointCalled).toBe(true);
+  });
+});

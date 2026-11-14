@@ -51,6 +51,7 @@ pub fn parse_line(line: &str) -> Option<Outbound> {
                 Some(TlsConfig {
                     enabled: true,
                     server_name: if sni.is_empty() { None } else { Some(sni) },
+                    alpn: None,
                     insecure: None,
                     reality: None,
                     utls: None,
@@ -144,7 +145,7 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
         "https" => 443,
         "http" => 80,
         "socks" | "socks5" => 1080,
-        "trojan" | "vless" | "anytls" | "hysteria" | "hysteria2" => 443,
+        "trojan" | "vless" | "anytls" | "hysteria" | "hysteria2" | "hy2" | "tuic" => 443,
         _ => 443,
     });
 
@@ -186,6 +187,7 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 Some(TlsConfig {
                     enabled: true,
                     server_name: extract_sni(&host, &params),
+                    alpn: None,
                     insecure: params.get("allowInsecure").map(|v| v == "1" || v == "true"),
                     reality: None,
                     utls: None,
@@ -221,6 +223,7 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 tls: Some(TlsConfig {
                     enabled: true,
                     server_name: sni,
+                    alpn: None,
                     insecure: Some(allow_insecure),
                     reality: None,
                     utls: None,
@@ -234,6 +237,7 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 Some(TlsConfig {
                     enabled: true,
                     server_name: extract_sni(&host, &params),
+                    alpn: None,
                     insecure: params.get("allowInsecure").map(|v| v == "1" || v == "true"),
                     reality: None,
                     utls: None,
@@ -280,6 +284,7 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 Some(TlsConfig {
                     enabled: true,
                     server_name: extract_sni(&host, &params),
+                    alpn: None,
                     insecure: params.get("allowInsecure").map(|v| v == "1" || v == "true"),
                     reality: reality_config,
                     utls: utls_config,
@@ -382,13 +387,14 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 tls: Some(TlsConfig {
                     enabled: true,
                     server_name: sni,
+                    alpn: None,
                     insecure: Some(allow_insecure),
                     reality: None,
                     utls: None,
                 }),
             }))
         }
-        "hysteria2" => {
+        "hysteria2" | "hy2" => {
             let pass = password.clone().or(username.clone()).unwrap_or_default();
             let pass = maybe_decode_base64(pass);
 
@@ -436,6 +442,52 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
                 tls: Some(TlsConfig {
                     enabled: true,
                     server_name: sni,
+                    alpn: None,
+                    insecure: Some(allow_insecure),
+                    reality: None,
+                    utls: None,
+                }),
+            }))
+        }
+        "tuic" => {
+            let uuid = username.unwrap_or_default();
+            let pass = password.unwrap_or_default();
+            let sni = extract_sni(&host, &params);
+            let allow_insecure = params
+                .get("insecure")
+                .or_else(|| params.get("allowInsecure"))
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+            let alpn = params.get("alpn").map(|a| {
+                a.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+            let congestion_control = params
+                .get("congestion_control")
+                .or_else(|| params.get("congestion-control"))
+                .cloned();
+            let udp_relay_mode = params
+                .get("udp-relay-mode")
+                .or_else(|| params.get("udp_relay_mode"))
+                .cloned();
+
+            Some(Outbound::Tuic(TuicOutbound {
+                tag,
+                server: host,
+                server_port: port,
+                uuid,
+                password: pass,
+                congestion_control,
+                udp_relay_mode,
+                udp_over_stream: None,
+                zero_rtt_handshake: None,
+                heartbeat: None,
+                tls: Some(TlsConfig {
+                    enabled: true,
+                    server_name: sni,
+                    alpn,
                     insecure: Some(allow_insecure),
                     reality: None,
                     utls: None,
@@ -446,11 +498,40 @@ fn parse_url_to_outbound(url: &Url, force_https: bool) -> Option<Outbound> {
     }
 }
 
-pub fn parse_subscription(content: &str, verbose: bool) -> (Vec<Outbound>, Vec<String>) {
+/// 尝试将订阅正文解析为 Sing-Box 原生 JSON 配置
+fn try_parse_singbox_json(content: &str) -> Option<(Vec<Outbound>, Vec<String>)> {
+    let val: serde_json::Value = serde_json::from_str(content).ok()?;
+    let outbounds_arr = val.get("outbounds")?.as_array()?;
+
     let mut outbounds = Vec::new();
     let mut skipped = Vec::new();
 
-    // First, check if the entire content is base64 encoded
+    for item in outbounds_arr {
+        let Ok(outbound) = serde_json::from_value::<Outbound>(item.clone()) else {
+            continue;
+        };
+
+        if outbound.is_announcement() {
+            skipped.push(outbound.tag().to_string());
+            continue;
+        }
+
+        outbounds.push(outbound);
+    }
+
+    Some((outbounds, skipped))
+}
+
+pub fn parse_subscription(content: &str, verbose: bool) -> (Vec<Outbound>, Vec<String>) {
+    // 1. 如果原始内容直接为 Sing-Box JSON 配置，优先解析
+    if let Some(result) = try_parse_singbox_json(content) {
+        if verbose {
+            eprintln!("[Info] Successfully parsed sing-box JSON subscription content.");
+        }
+        return result;
+    }
+
+    // 2. 尝试 Base64 解码
     let processed_content = if let Some(decoded) = decode_base64(content.to_string()) {
         if verbose {
             eprintln!("[Info] Successfully decoded base64 subscription content.");
@@ -462,6 +543,18 @@ pub fn parse_subscription(content: &str, verbose: bool) -> (Vec<Outbound>, Vec<S
         }
         content.to_string()
     };
+
+    // 3. 如果 Base64 解码后的内容也是 Sing-Box JSON 配置，同样支持解析
+    if let Some(result) = try_parse_singbox_json(&processed_content) {
+        if verbose {
+            eprintln!("[Info] Successfully parsed base64-decoded sing-box JSON subscription content.");
+        }
+        return result;
+    }
+
+    // 4. 逐行 URI 解析（兼容标准通用格式）
+    let mut outbounds = Vec::new();
+    let mut skipped = Vec::new();
 
     for line in processed_content.lines() {
         if let Some(outbound) = parse_line(line) {
@@ -503,5 +596,64 @@ mod tests {
         } else {
             panic!("Expected Socks outbound");
         }
+    }
+
+    #[test]
+    fn test_parse_tuic_node() {
+        let line = "tuic://my-uuid:my-pass@tuic.example.com:443?sni=sni.example.com&alpn=h3&congestion_control=bbr#TuicNode";
+        let outbound = parse_line(line).expect("Should parse tuic node");
+        if let Outbound::Tuic(tuic) = outbound {
+            assert_eq!(tuic.tag, "TuicNode");
+            assert_eq!(tuic.server, "tuic.example.com");
+            assert_eq!(tuic.server_port, 443);
+            assert_eq!(tuic.uuid, "my-uuid");
+            assert_eq!(tuic.password, "my-pass");
+            assert_eq!(tuic.congestion_control.as_deref(), Some("bbr"));
+            let tls = tuic.tls.expect("TLS should exist");
+            assert_eq!(tls.server_name.as_deref(), Some("sni.example.com"));
+            assert_eq!(tls.alpn, Some(vec!["h3".to_string()]));
+        } else {
+            panic!("Expected Tuic outbound");
+        }
+    }
+
+    #[test]
+    fn test_parse_singbox_json_subscription() {
+        let json_str = r#"{
+            "outbounds": [
+                {"type": "direct", "tag": "DIRECT"},
+                {"type": "selector", "tag": "Proxy", "outbounds": ["Node1"]},
+                {"type": "hysteria2", "tag": "剩余流量：100G", "server": "127.0.0.1", "server_port": 443, "password": "pass"},
+                {"type": "hysteria2", "tag": "Node1", "server": "hy2.example.com", "server_port": 8443, "password": "pass1"},
+                {"type": "tuic", "tag": "Node2", "server": "tuic.example.com", "server_port": 443, "uuid": "u1", "password": "p1"}
+            ]
+        }"#;
+        let (outbounds, skipped) = parse_subscription(json_str, false);
+        assert_eq!(outbounds.len(), 2);
+        assert_eq!(outbounds[0].tag(), "Node1");
+        assert_eq!(outbounds[1].tag(), "Node2");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0], "剩余流量：100G");
+    }
+
+    #[test]
+    fn test_parse_singbox_json_subscription_only_announcements() {
+        let json_str = r#"{
+            "outbounds": [
+                {"type": "hysteria2", "tag": "剩余流量：100G", "server": "127.0.0.1", "server_port": 443, "password": "pass"}
+            ]
+        }"#;
+        let (outbounds, skipped) = parse_subscription(json_str, false);
+        assert_eq!(outbounds.len(), 0);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0], "剩余流量：100G");
+    }
+
+    #[test]
+    fn test_parse_singbox_json_empty_outbounds() {
+        let json_str = r#"{"outbounds": []}"#;
+        let (outbounds, skipped) = parse_subscription(json_str, false);
+        assert_eq!(outbounds.len(), 0);
+        assert_eq!(skipped.len(), 0);
     }
 }

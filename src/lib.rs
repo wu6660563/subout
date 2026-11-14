@@ -174,13 +174,7 @@ pub async fn fetch_subscription(url: &str) -> anyhow::Result<String> {
 pub async fn fetch_subscription_with_info(
     url: &str,
 ) -> anyhow::Result<(String, SubscriptionUserInfo)> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-
-    let response = get_public_http_response(&client, url)
+    let response = get_public_http_response(url)
         .await?
         .error_for_status()?;
 
@@ -263,17 +257,16 @@ async fn resolve_http_target(
 /// Validates an HTTP(S) URL and requires every resolved address to be public.
 /// This keeps management actions from being used to access loopback/LAN/metadata services.
 pub async fn validate_public_http_url(raw_url: &str) -> anyhow::Result<Url> {
-    Ok(resolve_http_target(raw_url, false).await?.0)
+    Ok(resolve_http_target(raw_url, true).await?.0)
 }
 
 pub async fn get_public_http_response(
-    _client: &reqwest::Client,
     raw_url: &str,
 ) -> anyhow::Result<reqwest::Response> {
-    let mut target = resolve_http_target(raw_url, false).await?;
+    let mut target = resolve_http_target(raw_url, true).await?;
     for _ in 0..=10 {
         let mut builder = reqwest::Client::builder()
-            .user_agent("Subout/1.0")
+            .user_agent("sing-box/1.10.0")
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30));
         if let Some(address) = target.1 {
@@ -294,7 +287,7 @@ pub async fn get_public_http_response(
             .ok_or_else(|| anyhow::anyhow!("重定向响应缺少 Location"))?
             .to_str()?;
         let next_url = target.0.join(location)?;
-        target = resolve_http_target(next_url.as_str(), false).await?;
+        target = resolve_http_target(next_url.as_str(), true).await?;
     }
     anyhow::bail!("重定向次数超过 10 次")
 }

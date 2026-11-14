@@ -355,6 +355,14 @@ pub async fn run_server(port_opt: Option<u16>) -> Result<(), Box<dyn std::error:
             "/api/simple-config/preview",
             post(simple_api::preview_simple_config),
         )
+        .route(
+            "/api/simple-config/rulesets",
+            get(simple_api::get_rulesets_status),
+        )
+        .route(
+            "/api/simple-config/rulesets/cache",
+            post(simple_api::cache_rulesets),
+        )
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state(state);
 

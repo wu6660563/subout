@@ -136,6 +136,7 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
                     Outbound::Shadowsocks(_) => "shadowsocks",
                     Outbound::Hysteria(_) => "hysteria",
                     Outbound::Hysteria2(_) => "hysteria2",
+                    Outbound::Tuic(_) => "tuic",
                 };
 
                 let server = outbound.server().to_string();
@@ -149,6 +150,7 @@ pub async fn fetch_and_update_subscription(db_path: &str, sub_id: i64) -> Result
                     Outbound::Shadowsocks(o) => o.server_port,
                     Outbound::Hysteria(o) => o.server_port,
                     Outbound::Hysteria2(o) => o.server_port,
+                    Outbound::Tuic(o) => o.server_port,
                 };
 
                 let raw_json = serde_json::to_string(&outbound)?;

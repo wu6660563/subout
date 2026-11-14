@@ -371,6 +371,7 @@ async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
         let mut anytls_count = 0;
         let mut hysteria_count = 0;
         let mut hysteria2_count = 0;
+        let mut tuic_count = 0;
         for outbound in &outbounds {
             match outbound {
                 subout::parser::Outbound::Vmess(_) => vmess_count += 1,
@@ -382,6 +383,7 @@ async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
                 subout::parser::Outbound::Anytls(_) => anytls_count += 1,
                 subout::parser::Outbound::Hysteria(_) => hysteria_count += 1,
                 subout::parser::Outbound::Hysteria2(_) => hysteria2_count += 1,
+                subout::parser::Outbound::Tuic(_) => tuic_count += 1,
             }
         }
         eprintln!("[Info] Parsed nodes summary:");
@@ -411,6 +413,9 @@ async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         if hysteria2_count > 0 {
             eprintln!("  - Hysteria2: {}", hysteria2_count);
+        }
+        if tuic_count > 0 {
+            eprintln!("  - TUIC: {}", tuic_count);
         }
     }
 
